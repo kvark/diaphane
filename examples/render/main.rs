@@ -1,34 +1,36 @@
-//! Rendering to PNG files, with no window system involved.
+//! Render a simulation to PNG files, with no window system involved.
 //!
 //! This is what CI runs, and what makes the render path something that gets
 //! exercised on every push rather than only ever on a developer's desktop. It
-//! is a separate binary from the viewer because it shares the renderer and
+//! is a separate program from the viewer because it shares the renderer and
 //! nothing else: no event loop, no surface, no display.
 
-use crate::{
-    gpu::Simulation,
-    viz::{
-        options::{Common, TIMEOUT_MS},
-        render::{Capture, Renderer, ScrubBar},
-    },
+#[path = "../common/mod.rs"]
+mod common;
+
+use crate::common::{
+    options::{Args, COMMON_HELP, Common, TIMEOUT_MS, init_logging},
+    render::{Capture, Renderer, ScrubBar},
 };
 use blade_graphics as gpu;
+use diaphane::gpu::Simulation;
 use std::{
     error::Error,
     path::{Path, PathBuf},
+    process,
     sync::Arc,
 };
 
 /// Flags for the offscreen renderer, on top of the shared ones.
-pub struct Options {
-    pub common: Common,
-    pub frames: u32,
-    pub output_dir: PathBuf,
-    pub save_scene: Option<PathBuf>,
+struct Options {
+    common: Common,
+    frames: u32,
+    output_dir: PathBuf,
+    save_scene: Option<PathBuf>,
     /// Draw the scrub bar into the frames too. Off by default because these
     /// are meant to be clean images; CI turns it on so that branch of the
     /// shader is not dead code.
-    pub timeline: bool,
+    timeline: bool,
 }
 
 impl Default for Options {
@@ -43,10 +45,71 @@ impl Default for Options {
     }
 }
 
+fn help() -> String {
+    format!(
+        "\
+cargo render — render a 3D electromagnetic field to PNG files
+
+USAGE:
+    cargo render [OPTIONS]
+
+OPTIONS:
+{COMMON_HELP}\
+    --frames <N>                  how many frames to write   [default: 1]
+    --output-dir <PATH>           where the PNGs go          [default: frames]
+    --save-scene <PATH>           write the scene out and exit
+    --timeline                    draw the scrub bar into the frames
+
+Needs no window system, so this is what CI runs.
+"
+    )
+}
+
+fn parse() -> Result<Options, String> {
+    let mut options = Options::default();
+    let mut args = Args::from_env();
+    while let Some(flag) = args.next_flag() {
+        if options.common.accept(&flag, &mut args)? {
+            continue;
+        }
+        match flag.as_str() {
+            "-h" | "--help" => {
+                print!("{}", help());
+                process::exit(0);
+            }
+            "--frames" => options.frames = args.parse(&flag)?,
+            "--output-dir" => options.output_dir = PathBuf::from(args.value(&flag)?),
+            "--save-scene" => options.save_scene = Some(PathBuf::from(args.value(&flag)?)),
+            "--timeline" => options.timeline = true,
+            other => return Err(format!("unknown flag {other:?}; try --help")),
+        }
+    }
+    Ok(options)
+}
+
+fn main() {
+    init_logging();
+    let options = match parse() {
+        Ok(options) => options,
+        Err(complaint) => {
+            eprintln!("error: {complaint}");
+            process::exit(2);
+        }
+    };
+    let result = match options.save_scene.clone() {
+        Some(path) => save_scene(&options, &path),
+        None => run(&options),
+    };
+    if let Err(error) = result {
+        eprintln!("error: {error}");
+        process::exit(1);
+    }
+}
+
 /// Writes the resolved scene out as RON and stops.
 ///
 /// The intended way to start authoring: take a preset, dump it, edit the file.
-pub fn save_scene(options: &Options, path: &Path) -> Result<(), Box<dyn Error>> {
+fn save_scene(options: &Options, path: &Path) -> Result<(), Box<dyn Error>> {
     let scene = options.common.scene()?;
     scene.save(path)?;
     println!(
@@ -58,9 +121,9 @@ pub fn save_scene(options: &Options, path: &Path) -> Result<(), Box<dyn Error>> 
 }
 
 /// Renders `frames` frames to PNGs without ever touching a window system.
-pub fn run(options: &Options) -> Result<(), Box<dyn Error>> {
+fn run(options: &Options) -> Result<(), Box<dyn Error>> {
     let frames = options.frames;
-    let context = crate::gpu::headless_context()?;
+    let context = diaphane::gpu::headless_context()?;
     println!(
         "device: {}",
         context.device_information().device_name.trim()

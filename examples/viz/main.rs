@@ -1,18 +1,21 @@
-//! The interactive viewer: a window, an orbit camera, and a scrub bar.
+//! Watch a 3D electromagnetic field evolve, in a window.
 //!
-//! Everything here needs a display. The offscreen path lives in
-//! [`crate::viz::offscreen`] and shares the renderer but none of this.
+//! Everything here needs a display. The offscreen path is the `render` example,
+//! which shares the renderer but none of this.
 
-use crate::{
-    gpu::Simulation,
-    timeline::{Steppable, Timeline},
-    viz::{
-        options::{Common, TIMEOUT_MS},
-        render::{Renderer, ScrubBar, ViewMode},
-    },
+#[path = "../common/mod.rs"]
+mod common;
+
+use crate::common::{
+    options::{Args, COMMON_HELP, Common, TIMEOUT_MS, init_logging},
+    render::{Renderer, ScrubBar, ViewMode},
 };
 use blade_graphics as gpu;
-use std::{error::Error, sync::Arc, time::Instant};
+use diaphane::{
+    gpu::Simulation,
+    timeline::{Steppable, Timeline},
+};
+use std::{error::Error, process, sync::Arc, time::Instant};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -26,7 +29,7 @@ use winit::{
 /// sixteen-frame ring bounds the memory: at 96³ that is 16 × 21 MB.
 const KEYFRAME_INTERVAL: u64 = 200;
 
-pub const KEYS: &str = "\
+const KEYS: &str = "\
 KEYS
     space          pause / resume
     R              reset the fields
@@ -45,6 +48,59 @@ cover and can be scrubbed to instantly; dragging outside it replays from the
 start, which is slower but always available -- the state here is a pure
 function of the step number, so a replayed step is the step.
 ";
+
+fn help() -> String {
+    format!(
+        "\
+cargo viz — watch a 3D electromagnetic field evolve
+
+USAGE:
+    cargo viz [OPTIONS]
+
+OPTIONS:
+{COMMON_HELP}\
+    --exit-after <FRAMES>         present this many frames, then quit
+
+{KEYS}
+Use `cargo render` to write PNGs instead, on a machine with no display.
+"
+    )
+}
+
+fn parse() -> Result<(Common, Option<u64>), String> {
+    let mut common = Common::default();
+    let mut exit_after = None;
+    let mut args = Args::from_env();
+    while let Some(flag) = args.next_flag() {
+        if common.accept(&flag, &mut args)? {
+            continue;
+        }
+        match flag.as_str() {
+            "-h" | "--help" => {
+                print!("{}", help());
+                process::exit(0);
+            }
+            "--exit-after" => exit_after = Some(args.parse(&flag)?),
+            other => return Err(format!("unknown flag {other:?}; try --help")),
+        }
+    }
+    Ok((common, exit_after))
+}
+
+fn main() {
+    init_logging();
+    let (common, exit_after) = match parse() {
+        Ok(parsed) => parsed,
+        Err(complaint) => {
+            eprintln!("error: {complaint}");
+            process::exit(2);
+        }
+    };
+    if let Err(error) = run(common, exit_after) {
+        eprintln!("error: {error}");
+        process::exit(1);
+    }
+}
 
 struct App {
     common: Common,
@@ -70,7 +126,7 @@ struct App {
     furthest: u64,
 }
 
-pub fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
+fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
     // SAFETY: `Context::init` loads the platform driver; there is no caller
     // precondition beyond building one context.
     let context = Arc::new(unsafe {
