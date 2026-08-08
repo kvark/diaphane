@@ -65,6 +65,7 @@ struct FieldData {
     material_index: gpu::BufferPiece,
     coefficients: gpu::BufferPiece,
     absorber: gpu::BufferPiece,
+    geometry: gpu::BufferPiece,
     params: Params,
 }
 
@@ -80,6 +81,7 @@ struct Buffers {
     material_index: gpu::Buffer,
     coefficients: gpu::Buffer,
     absorber: gpu::Buffer,
+    geometry: gpu::Buffer,
     /// Host-visible destination for [`Simulation::read_electric`] and friends.
     readback: gpu::Buffer,
 }
@@ -136,6 +138,7 @@ impl Simulation {
         let indices = scene.material_indices();
         let coefficients = scene.materials.coefficients(&scene.grid);
         let absorption = AbsorbingProfile::new(&scene.grid, scene.boundary).packed();
+        let geometry = scene.grid.packed_geometry();
 
         let device_buffer = |name: &str, size: u64| {
             context.create_buffer(gpu::BufferDesc {
@@ -150,6 +153,7 @@ impl Simulation {
             material_index: device_buffer("material index", byte_size(&indices)),
             coefficients: device_buffer("material coefficients", byte_size(&coefficients)),
             absorber: device_buffer("absorber profile", byte_size(&absorption)),
+            geometry: device_buffer("axis geometry", byte_size(&geometry)),
             readback: context.create_buffer(gpu::BufferDesc {
                 name: "readback",
                 size: field_bytes,
@@ -169,6 +173,7 @@ impl Simulation {
         let material_at = append(&mut staging_data, &indices);
         let coefficients_at = append(&mut staging_data, &coefficients);
         let absorber_at = append(&mut staging_data, &absorption);
+        let geometry_at = append(&mut staging_data, &geometry);
         let staging = context.create_buffer(gpu::BufferDesc {
             name: "scene upload",
             size: staging_data.len() as u64,
@@ -201,6 +206,11 @@ impl Simulation {
                 buffers.absorber.into(),
                 byte_size(&absorption),
             );
+            pass.copy_buffer_to_buffer(
+                staging.at(geometry_at),
+                buffers.geometry.into(),
+                byte_size(&geometry),
+            );
         }
         let sync_point = context.submit(&mut encoder);
         context
@@ -218,7 +228,7 @@ impl Simulation {
             pipelines,
             encoder,
             sync_point: Some(sync_point),
-            grid: scene.grid,
+            grid: scene.grid.clone(),
             sources: scene.sources.clone(),
             field_bytes,
             step: 0,
@@ -510,6 +520,7 @@ impl FieldData {
             material_index: buffers.material_index.into(),
             coefficients: buffers.coefficients.into(),
             absorber: buffers.absorber.into(),
+            geometry: buffers.geometry.into(),
             params,
         }
     }
@@ -523,6 +534,7 @@ impl Drop for Simulation {
         self.context.destroy_buffer(self.buffers.material_index);
         self.context.destroy_buffer(self.buffers.coefficients);
         self.context.destroy_buffer(self.buffers.absorber);
+        self.context.destroy_buffer(self.buffers.geometry);
         self.context.destroy_buffer(self.buffers.readback);
         self.context
             .destroy_compute_pipeline(&mut self.pipelines.magnetic);

@@ -65,6 +65,21 @@ pub struct Simulation {
     material_index: Vec<u32>,
     materials: MaterialTable,
     coefficients: Vec<Coefficients>,
+    /// `c·Δt/Δ` per cell per axis, primary spacing for `H` and dual for `E`.
+    /// Hoisted out of the grid once rather than recomputed per step: they are
+    /// three small 1D arrays each, and they live in cache the same way the
+    /// absorber profile does.
+    magnetic_gains: [Vec<f32>; 3],
+    electric_gains: [Vec<f32>; 3],
+    /// A row of `1.0`, `extent.x` long.
+    ///
+    /// Exactly one of the two curl terms differences along the innermost axis,
+    /// so exactly one gain varies down a row and the other is fixed. Testing
+    /// which per cell costs about 15% of the sweep — measured — so instead the
+    /// fixed one is folded into a scalar and the varying one walks a slice,
+    /// with this standing in when neither does. Two L1 reads and two multiplies
+    /// on a kernel that is waiting for memory anyway.
+    ones: Vec<f32>,
     absorber: AbsorbingProfile,
     sources: Vec<Source>,
     step: u64,
@@ -77,12 +92,15 @@ impl Simulation {
         scene.grid.validate();
         let total = scene.grid.extent.total();
         Self {
-            grid: scene.grid,
+            grid: scene.grid.clone(),
             electric: std::array::from_fn(|_| vec![0.0; total]),
             magnetic: std::array::from_fn(|_| vec![0.0; total]),
             material_index: scene.material_indices(),
             materials: scene.materials.clone(),
             coefficients: scene.materials.coefficients(&scene.grid),
+            magnetic_gains: Axis::ALL.map(|axis| scene.grid.magnetic_gains(axis)),
+            electric_gains: Axis::ALL.map(|axis| scene.grid.electric_gains(axis)),
+            ones: vec![1.0; scene.grid.extent.x as usize],
             absorber: AbsorbingProfile::new(&scene.grid, scene.boundary),
             sources: scene.sources.clone(),
             step: 0,
@@ -239,6 +257,11 @@ impl Simulation {
             limit[b] -= 1;
             limit[c] -= 1;
 
+            // `H` differences `E` between two corners, which is one whole cell:
+            // the primary spacing. On a uniform grid every entry is `courant`.
+            let (gain_b, gain_c) = (&self.magnetic_gains[b], &self.magnetic_gains[c]);
+            let along_b: &[f32] = if b == 0 { gain_b } else { &self.ones };
+            let along_c: &[f32] = if c == 0 { gain_c } else { &self.ones };
             let target = &mut self.magnetic[a];
             let field_b = &self.electric[b];
             let field_c = &self.electric[c];
@@ -246,10 +269,23 @@ impl Simulation {
                 for y in 0..limit[1] {
                     let row = (z * extent[1] + y) * extent[0];
                     let (absorb_x, absorb_row) = self.absorber.magnetic_row(axis, y, z);
-                    for (x, &absorb) in absorb_x.iter().enumerate().take(limit[0]) {
+                    // Resolved per row, not per cell. Building a `[x, y, z]`
+                    // here and indexing it by a runtime axis inside the sweep
+                    // measured 20.4 Mcell-steps/s against 27.8 for this, on a
+                    // kernel whose uniform-grid ceiling on the same machine
+                    // was 33.0 -- the addressing cost more than the arithmetic
+                    // it fed.
+                    let along_row = [0, y, z];
+                    let row_b = if b == 0 { 1.0 } else { gain_b[along_row[b]] };
+                    let row_c = if c == 0 { 1.0 } else { gain_c[along_row[c]] };
+                    let along = along_b.iter().zip(along_c);
+                    for ((x, &absorb), (&gbx, &gcx)) in
+                        absorb_x.iter().enumerate().zip(along).take(limit[0])
+                    {
                         let index = row + x;
-                        let curl = (field_c[index + stride_b] - field_c[index])
-                            - (field_b[index + stride_c] - field_b[index]);
+                        let (gb, gc) = (row_b * gbx, row_c * gcx);
+                        let curl = gb * (field_c[index + stride_b] - field_c[index])
+                            - gc * (field_b[index + stride_c] - field_b[index]);
                         let coefficients = self.coefficients[self.material_index[index] as usize];
                         let loss = coefficients.magnetic_loss + absorb_row + absorb;
                         target[index] = ((1.0 - loss) * target[index]
@@ -278,6 +314,11 @@ impl Simulation {
             start[b] = 1;
             start[c] = 1;
 
+            // `E` differences `H` between two cell centres, which spans two
+            // half cells that need not be the same size: the dual spacing.
+            let (gain_b, gain_c) = (&self.electric_gains[b], &self.electric_gains[c]);
+            let along_b: &[f32] = if b == 0 { gain_b } else { &self.ones };
+            let along_c: &[f32] = if c == 0 { gain_c } else { &self.ones };
             let target = &mut self.electric[a];
             let field_b = &self.magnetic[b];
             let field_c = &self.magnetic[c];
@@ -285,10 +326,23 @@ impl Simulation {
                 for y in start[1]..extent[1] {
                     let row = (z * extent[1] + y) * extent[0];
                     let (absorb_x, absorb_row) = self.absorber.electric_row(axis, y, z);
-                    for (x, &absorb) in absorb_x.iter().enumerate().skip(start[0]) {
+                    // Resolved per row, not per cell. Building a `[x, y, z]`
+                    // here and indexing it by a runtime axis inside the sweep
+                    // measured 20.4 Mcell-steps/s against 27.8 for this, on a
+                    // kernel whose uniform-grid ceiling on the same machine
+                    // was 33.0 -- the addressing cost more than the arithmetic
+                    // it fed.
+                    let along_row = [0, y, z];
+                    let row_b = if b == 0 { 1.0 } else { gain_b[along_row[b]] };
+                    let row_c = if c == 0 { 1.0 } else { gain_c[along_row[c]] };
+                    let along = along_b.iter().zip(along_c);
+                    for ((x, &absorb), (&gbx, &gcx)) in
+                        absorb_x.iter().enumerate().zip(along).skip(start[0])
+                    {
                         let index = row + x;
-                        let curl = (field_c[index] - field_c[index - stride_b])
-                            - (field_b[index] - field_b[index - stride_c]);
+                        let (gb, gc) = (row_b * gbx, row_c * gcx);
+                        let curl = gb * (field_c[index] - field_c[index - stride_b])
+                            - gc * (field_b[index] - field_b[index - stride_c]);
                         let coefficients = self.coefficients[self.material_index[index] as usize];
                         let loss = coefficients.electric_loss + absorb_row + absorb;
                         target[index] = ((1.0 - loss) * target[index]
@@ -315,6 +369,9 @@ impl Simulation {
             start[b] = 1;
             start[c] = 1;
 
+            let (gain_b, gain_c) = (&self.electric_gains[b], &self.electric_gains[c]);
+            let along_b: &[f32] = if b == 0 { gain_b } else { &self.ones };
+            let along_c: &[f32] = if c == 0 { gain_c } else { &self.ones };
             let target = &mut self.electric[a];
             let field_b = &self.magnetic[b];
             let field_c = &self.magnetic[c];
@@ -322,10 +379,23 @@ impl Simulation {
                 for y in start[1]..extent[1] {
                     let row = (z * extent[1] + y) * extent[0];
                     let (absorb_x, absorb_row) = self.absorber.electric_row(axis, y, z);
-                    for (x, &absorb) in absorb_x.iter().enumerate().skip(start[0]) {
+                    // Resolved per row, not per cell. Building a `[x, y, z]`
+                    // here and indexing it by a runtime axis inside the sweep
+                    // measured 20.4 Mcell-steps/s against 27.8 for this, on a
+                    // kernel whose uniform-grid ceiling on the same machine
+                    // was 33.0 -- the addressing cost more than the arithmetic
+                    // it fed.
+                    let along_row = [0, y, z];
+                    let row_b = if b == 0 { 1.0 } else { gain_b[along_row[b]] };
+                    let row_c = if c == 0 { 1.0 } else { gain_c[along_row[c]] };
+                    let along = along_b.iter().zip(along_c);
+                    for ((x, &absorb), (&gbx, &gcx)) in
+                        absorb_x.iter().enumerate().zip(along).skip(start[0])
+                    {
                         let index = row + x;
-                        let curl = (field_c[index] - field_c[index - stride_b])
-                            - (field_b[index] - field_b[index - stride_c]);
+                        let (gb, gc) = (row_b * gbx, row_c * gcx);
+                        let curl = gb * (field_c[index] - field_c[index - stride_b])
+                            - gc * (field_b[index] - field_b[index - stride_c]);
                         let coefficients = self.coefficients[self.material_index[index] as usize];
                         let loss = coefficients.electric_loss + absorb_row + absorb;
                         target[index] = ((1.0 + loss) * target[index]
@@ -348,6 +418,9 @@ impl Simulation {
             limit[b] -= 1;
             limit[c] -= 1;
 
+            let (gain_b, gain_c) = (&self.magnetic_gains[b], &self.magnetic_gains[c]);
+            let along_b: &[f32] = if b == 0 { gain_b } else { &self.ones };
+            let along_c: &[f32] = if c == 0 { gain_c } else { &self.ones };
             let target = &mut self.magnetic[a];
             let field_b = &self.electric[b];
             let field_c = &self.electric[c];
@@ -355,10 +428,23 @@ impl Simulation {
                 for y in 0..limit[1] {
                     let row = (z * extent[1] + y) * extent[0];
                     let (absorb_x, absorb_row) = self.absorber.magnetic_row(axis, y, z);
-                    for (x, &absorb) in absorb_x.iter().enumerate().take(limit[0]) {
+                    // Resolved per row, not per cell. Building a `[x, y, z]`
+                    // here and indexing it by a runtime axis inside the sweep
+                    // measured 20.4 Mcell-steps/s against 27.8 for this, on a
+                    // kernel whose uniform-grid ceiling on the same machine
+                    // was 33.0 -- the addressing cost more than the arithmetic
+                    // it fed.
+                    let along_row = [0, y, z];
+                    let row_b = if b == 0 { 1.0 } else { gain_b[along_row[b]] };
+                    let row_c = if c == 0 { 1.0 } else { gain_c[along_row[c]] };
+                    let along = along_b.iter().zip(along_c);
+                    for ((x, &absorb), (&gbx, &gcx)) in
+                        absorb_x.iter().enumerate().zip(along).take(limit[0])
+                    {
                         let index = row + x;
-                        let curl = (field_c[index + stride_b] - field_c[index])
-                            - (field_b[index + stride_c] - field_b[index]);
+                        let (gb, gc) = (row_b * gbx, row_c * gcx);
+                        let curl = gb * (field_c[index + stride_b] - field_c[index])
+                            - gc * (field_b[index + stride_c] - field_b[index]);
                         let coefficients = self.coefficients[self.material_index[index] as usize];
                         let loss = coefficients.magnetic_loss + absorb_row + absorb;
                         target[index] = ((1.0 + loss) * target[index]
@@ -398,7 +484,8 @@ impl Simulation {
                             injection.origin[1] + dy,
                             injection.origin[2] + dz,
                         ];
-                        target[self.grid.extent.index(coord)] += value * injection.weight(coord);
+                        target[self.grid.extent.index(coord)] +=
+                            value * injection.weight(self.grid.cell_center(coord));
                     }
                 }
             }
