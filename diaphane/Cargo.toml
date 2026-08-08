@@ -1,0 +1,22 @@
+[package]
+name = "diaphane"
+description = "Real-time 3D electrodynamics: a GPU FDTD solver you watch rather than post-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories = ["science", "simulation", "graphics"]
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+
+[lints]
+workspace = true
+

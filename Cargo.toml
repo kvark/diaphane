@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["diaphane"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["Dzmitry Malyshau <kvark@fastmail.com>"]
+license = "MIT"
+repository = "https://github.com/kvark/diaphane"
+keywords = ["electromagnetics", "fdtd", "simulation", "gpu"]
+
+[workspace.dependencies]
+blade-graphics = "0.8"
+blade-macros = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+diaphane = { path = "diaphane", version = "0.1.0" }
+log = "0.4"
+
+# Mirrors the lint configuration of `blade-graphics`, which this project
+# follows for coding conventions. The comments are theirs.
+[workspace.lints.rust]
+trivial_numeric_casts = "warn"
+unused_extern_crates = "warn"
+
+[workspace.lints.clippy]
+# We don't use syntax sugar where it's not necessary.
+match_like_matches_macro = "allow"
+# Redundant matching is more explicit.
+redundant_pattern_matching = "allow"
+# Explicit lifetimes are often easier to reason about.
+needless_lifetimes = "allow"
+# No need for defaults in the internal types.
+new_without_default = "allow"
+# Matches are good and extendable, no need to make an exception here.
+single_match = "allow"
+# Push commands are more regular than macros.
+vec_init_then_push = "allow"
+# Let me decide when it's too many.
+too_many_arguments = "allow"
+# We don't match on a reference, unless required.
+pattern_type_mismatch = "warn"
+
+[profile.release]
+debug = 1
