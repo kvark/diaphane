@@ -7,8 +7,10 @@
 //! single binary with an `--offscreen` switch would mean every flag has to
 //! document which mode it applies in.
 
-use crate::render::{ViewMode, ViewSettings};
-use diaphane::{Extent, Scene};
+use crate::{
+    Extent, Scene,
+    viz::render::{ViewMode, ViewSettings},
+};
 use std::{env, path::PathBuf, str::FromStr};
 
 /// Millisecond timeout on every GPU wait. Generous, because a batch of a few
@@ -199,7 +201,7 @@ pub fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::{Args, Common, SceneSource};
-    use crate::render::ViewMode;
+    use crate::viz::render::ViewMode;
     use std::path::PathBuf;
 
     fn args(items: &[&str]) -> Args {

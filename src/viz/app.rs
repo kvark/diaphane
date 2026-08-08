@@ -1,17 +1,17 @@
 //! The interactive viewer: a window, an orbit camera, and a scrub bar.
 //!
 //! Everything here needs a display. The offscreen path lives in
-//! [`crate::offscreen`] and shares the renderer but none of this.
+//! [`crate::viz::offscreen`] and shares the renderer but none of this.
 
 use crate::{
-    options::{Common, TIMEOUT_MS},
-    render::{Renderer, ScrubBar, ViewMode},
-};
-use blade_graphics as gpu;
-use diaphane::{
     gpu::Simulation,
     timeline::{Steppable, Timeline},
+    viz::{
+        options::{Common, TIMEOUT_MS},
+        render::{Renderer, ScrubBar, ViewMode},
+    },
 };
+use blade_graphics as gpu;
 use std::{error::Error, sync::Arc, time::Instant};
 use winit::{
     application::ApplicationHandler,

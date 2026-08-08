@@ -11,8 +11,8 @@ energy back and forth as it goes.
 Built on [`blade-graphics`](https://github.com/kvark/blade).
 
 ```
-cargo run --release -p diaphane-viz                       # a window
-cargo run --release -p diaphane-viz --bin diaphane-render # PNGs, no display
+cargo viz              # a window
+cargo render           # PNGs, no display
 ```
 
 ## Scenes
@@ -25,9 +25,8 @@ anything, which makes "run it at 2× and check the answer stopped changing" one
 call.
 
 ```
-cargo run --release -p diaphane-viz -- --scene scenes/double-slit.ron
-cargo run --release -p diaphane-viz --bin diaphane-render -- \
-    --scene cavity --save-scene mine.ron
+cargo viz --scene scenes/double-slit.ron
+cargo render --scene cavity --save-scene mine.ron
 ```
 
 [`scenes/`](scenes) has five worked examples — free flight, a conducting
@@ -40,7 +39,7 @@ The state is a pure function of `(scene, step)`. Nothing is random, sources are
 analytic, so any step can be reproduced rather than recorded. That gives two
 independent ways to move backwards:
 
-- **Keyframes.** [`Timeline`](diaphane/src/timeline.rs) snapshots the fields
+- **Keyframes.** [`Timeline`](src/timeline.rs) snapshots the fields
   periodically; seeking restores the nearest earlier one and replays. That is
   what the scrub bar along the bottom of the window drags. 24 bytes per cell
   per keyframe, so a long run gets a *window* rather than a full history.
@@ -51,15 +50,21 @@ independent ways to move backwards:
 
 ## What is here
 
+One crate. The library is the solver and is **headless by default** — nothing
+in the default feature set knows what a window is, so `diaphane` can be
+depended on, tested in CI, or embedded elsewhere without dragging one in. CI
+asserts that rather than trusting it.
+
+The visualizer is two binary targets behind the `viz` feature:
+
 | | |
 |---|---|
-| `diaphane` | the solver, headless. No windowing dependency; runs in CI. |
 | `diaphane-viz` | the viewer: a window, an orbit camera, and a scrub bar. |
 | `diaphane-render` | the same view, written to PNGs. Needs no display. |
 
-The two binaries share the renderer and nothing else — one needs an event loop
-and a surface, the other needs neither, which is what lets CI run the second on
-a headless machine and the first under Xvfb.
+They share the render pass and nothing else — one needs an event loop and a
+surface, the other needs neither, which is what lets CI run the second on a
+headless machine and the first under Xvfb.
 
 The solver comes in two implementations of the same physics. `diaphane::gpu` is
 the blade compute pipeline and is the one that has to be fast.
@@ -82,12 +87,11 @@ profile is separable and therefore costs three 1D arrays rather than a field.
 
 The conventions that are easy to get wrong — which sample sits at which
 half-cell, which difference is forward and which is backward — are written down
-in [`diaphane/src/grid.rs`](diaphane/src/grid.rs) and referred to from
-everywhere else. Every FDTD bug is an off-by-half.
+in [`src/grid.rs`](src/grid.rs) and referred to from everywhere else. Every FDTD bug is an off-by-half.
 
 ## Validation
 
-`cargo test --workspace` runs, without needing a GPU:
+`cargo test` runs, without needing a GPU:
 
 - **an exact discrete plane wave**, seeded and required to propagate exactly —
   not a discretized continuum solution but a solution of the stepping scheme
@@ -136,7 +140,7 @@ numbers, the caveats, and what is deliberately *not* being compared are in
 [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ```
-cargo bench -p diaphane
+cargo bench
 ```
 
 ## Documentation

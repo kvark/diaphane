@@ -29,7 +29,7 @@
 //! latency is bandwidth. What this benchmark shows is the size of that trade,
 //! not that one implementation is better written than the other.
 //!
-//! Run with `cargo bench -p diaphane --bench ecosystem`.
+//! Run with `cargo bench --bench ecosystem`.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use diaphane::{Axis, Boundary, Extent, Scene, Source, Waveform, cpu};

@@ -25,7 +25,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       # Blade selects its backend by target, so the Metal path is never
       # compiled on Linux -- and it differs enough to break: a pipeline
@@ -35,7 +35,7 @@ jobs:
       - name: Install the macOS target
         run: rustup target add aarch64-apple-darwin
       - name: Cross-check the Metal backend
-        run: cargo clippy --workspace --all-targets --all-features
+        run: cargo clippy --all-targets --all-features
              --target aarch64-apple-darwin -- -D warnings
 
   test:
@@ -55,14 +55,21 @@ jobs:
             xvfb libxkbcommon-dev libxkbcommon-x11-0 libx11-xcb1 libxcb-xkb1
       - uses: Swatinem/rust-cache@v2
       - name: Test
-        run: cargo test --workspace --all-features --release
+        run: cargo test --all-features --release
+
+      # The solver half has to stay usable without a window system, and the
+      # only way that stays true is checking it.
+      - name: Check that the library is still headless
+        run: |
+          cargo build --no-default-features
+          ! cargo tree --no-default-features -e normal | grep -qE '\bwinit\b|\bpng\b'
+
 
       - name: Render a frame offscreen
         # The whole render path: pipelines, the auto-range reduction, the
         # scrub bar, and the readback -- with no display involved at all.
         run: |
-          cargo run --release -p diaphane-viz --bin diaphane-render -- \
-            --frames 1 --extent 64 --warmup 110 --steps 10 \
+          cargo render --frames 1 --extent 64 --warmup 110 --steps 10 \
             --size 480x360 --mode electric --timeline --output-dir frames
 
       - name: Smoke-test the windowed viewer under Xvfb
@@ -72,8 +79,7 @@ jobs:
         # developer's machine.
         run: |
           xvfb-run -a --server-args="-screen 0 800x600x24" \
-            cargo run --release -p diaphane-viz --bin diaphane-viz -- \
-              --extent 48 --steps 4 --exit-after 20 --size 480x360
+            cargo viz --extent 48 --steps 4 --exit-after 20 --size 480x360
 
       - uses: actions/upload-artifact@v4
         with:
@@ -91,4 +97,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --workspace --all-targets --all-features
+        run: cargo build --all-targets --all-features

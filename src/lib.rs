@@ -48,6 +48,9 @@ pub mod scene;
 pub mod source;
 pub mod timeline;
 
+#[cfg(feature = "viz")]
+pub mod viz;
+
 pub use boundary::Boundary;
 pub use grid::{Axis, Extent, Grid};
 pub use material::{Material, MaterialTable};

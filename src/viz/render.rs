@@ -4,9 +4,8 @@
 //! copied, converted, or staged between the compute kernel writing a field and
 //! the pixel that displays it.
 
-use crate::camera::Camera;
+use crate::{Extent, gpu::Simulation, viz::camera::Camera};
 use blade_graphics as gpu;
-use diaphane::{Extent, gpu::Simulation};
 use std::{fs, io, mem, path::Path, sync::Arc};
 
 /// Which quantity the volume shows.

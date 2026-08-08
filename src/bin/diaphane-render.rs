@@ -1,6 +1,6 @@
 //! Render a simulation to PNG files. Needs no display.
 
-use diaphane_viz::{
+use diaphane::viz::{
     offscreen,
     options::{Args, COMMON_HELP, init_logging},
 };

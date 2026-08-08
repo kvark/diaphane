@@ -11,7 +11,7 @@
 // angle that is simply incorrect, with nothing to announce the problem.
 //
 // Try:
-//   cargo run --release -p diaphane-viz -- --scene scenes/glass-slab.ron --mode electric --warmup 200
+//   cargo viz --scene scenes/glass-slab.ron --mode electric --warmup 200
 
 Scene(
     grid: Grid(
