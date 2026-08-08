@@ -12,13 +12,14 @@ categories = ["science", "simulation", "graphics"]
 
 [features]
 default = []
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:ron"]
 
 [dependencies]
 blade-graphics.workspace = true
 blade-macros.workspace = true
 bytemuck.workspace = true
 log.workspace = true
+ron = { version = "0.12", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]

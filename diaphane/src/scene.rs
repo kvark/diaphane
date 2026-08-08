@@ -345,6 +345,48 @@ impl Scene {
     }
 }
 
+/// Reading and writing scenes as files.
+///
+/// RON rather than JSON: it round-trips Rust enums without inventing a tag
+/// convention, it allows comments, and a scene file is meant to be read and
+/// edited by a person. `Scene` is a plain data structure precisely so this is
+/// possible — the alternative, which most FDTD packages take, is for a scene to
+/// be a *program*, which you cannot diff, hash, or hand to a solver you did not
+/// compile yourself.
+#[cfg(feature = "serde")]
+impl Scene {
+    /// Parses a scene, reporting the line and column of a syntax error.
+    ///
+    /// Does not validate — call [`Self::validate`] afterwards. Parsing and
+    /// meaning are separate failures and a caller may want to fix one without
+    /// the other stopping it.
+    pub fn from_ron(text: &str) -> Result<Self, String> {
+        ron::from_str(text).map_err(|error| error.to_string())
+    }
+
+    /// Serializes a scene, formatted for a human to edit afterwards.
+    pub fn to_ron(&self) -> Result<String, String> {
+        let config = ron::ser::PrettyConfig::new()
+            .struct_names(true)
+            .separate_tuple_members(false);
+        ron::ser::to_string_pretty(self, config).map_err(|error| error.to_string())
+    }
+
+    /// Reads a scene from disk.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        Self::from_ron(&text).map_err(|error| format!("{}: {error}", path.display()))
+    }
+
+    /// Writes a scene to disk.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        std::fs::write(path, self.to_ron()?).map_err(|error| format!("{}: {error}", path.display()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Scene, Shape};

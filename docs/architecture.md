@@ -103,7 +103,7 @@ array bounds leaves the outermost tangential `E` samples at zero forever, which
 is exactly a perfect electric conductor. That is what the energy-conservation
 test runs in.
 
-## Deviation 5: geometry in metres, not cells
+## Deviation 4: geometry in metres, not cells
 
 The brief does not say which, and the obvious first implementation puts shapes
 and sources at cell indices. That is a trap: a scene written in cells is welded
@@ -131,18 +131,28 @@ sources outside it, and says so in those words.
 
 [`Scene::with_resolution`]: ../diaphane/src/scene.rs
 
-## Deviation 4: no `egui` yet
+## Deviation 5: no `egui` yet
 
 The brief's Phase 3 is an interaction layer built on egui. The visualizer here
 has time controls, camera control, view-mode switching, brightness and
 signed-log toggles on the keyboard, with the perf HUD — steps/s, effective
 GB/s, frame time, simulation time — in the window title.
 
-Scene *authoring* is not implemented at all. Scenes are the three presets in
-[`scene.rs`](../diaphane/src/scene.rs), selected with `--scene`. The types
-derive `serde` behind a feature flag, so file-based scenes are a small step,
-but nothing reads or writes one yet and the brief's painting and dragging are
-untouched.
+Scene authoring is by **file**, not by pointer. `--scene <path.ron>` loads one
+and `--save-scene <path>` writes the resolved scene out, so the way in is: take
+a preset, dump it, edit it. [`scenes/`](../scenes) holds five commented
+examples, and `tests/scenes.rs` parses, validates, rasterizes and steps every
+one of them so they cannot rot.
+
+RON rather than JSON because it round-trips Rust enums without a tag
+convention and allows comments, and a scene file is meant to be read. The
+alternative most FDTD packages take — Meep, Lumerical — is for a scene to be a
+*program*, which is more expressive and cannot be diffed, hashed, or handed to
+a solver you did not compile. Tidy3D is the counterexample that proves the
+point: its scenes are declarative JSON because the solver runs elsewhere and
+the scene has to travel.
+
+The brief's painting and dragging are still untouched.
 
 ## What carried over unchanged
 
