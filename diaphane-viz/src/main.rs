@@ -11,9 +11,13 @@
 mod camera;
 mod render;
 
-use crate::render::{Capture, Renderer, ViewMode, ViewSettings};
+use crate::render::{Capture, Renderer, ScrubBar, ViewMode, ViewSettings};
 use blade_graphics as gpu;
-use diaphane::{Extent, Scene, gpu::Simulation};
+use diaphane::{
+    Extent, Scene,
+    gpu::Simulation,
+    timeline::{Steppable, Timeline},
+};
 use std::{env, error::Error, path::PathBuf, process, sync::Arc, time::Instant};
 use winit::{
     application::ApplicationHandler,
@@ -25,6 +29,10 @@ use winit::{
 };
 
 const TIMEOUT_MS: u32 = 120_000;
+
+/// Steps between keyframes. Bounds the worst-case scrub replay, and with a
+/// sixteen-frame ring bounds the memory: at 96³ that is 16 × 21 MB.
+const KEYFRAME_INTERVAL: u64 = 200;
 
 const HELP: &str = "\
 diaphane-viz — watch a 3D electromagnetic field evolve
@@ -46,6 +54,7 @@ OPTIONS:
     --frames <N>                  render N frames offscreen and exit
     --output-dir <PATH>           where the PNGs go          [default: frames]
     --size <WxH>                  offscreen resolution       [default: 720x540]
+    --timeline                    draw the scrub bar in offscreen frames too
     -h, --help                    this
 
 KEYS (windowed)
@@ -55,9 +64,16 @@ KEYS (windowed)
     1 2 3 4        energy split / Ez / Hz / total energy
     L              toggle signed-log scaling
     - / =          brightness
-    drag           orbit
+    [ / ]          scrub back / forward one keyframe interval
+    home           scrub to the start
+    drag           orbit, or scrub when the pointer is on the bar
     scroll         zoom
     escape         quit
+
+The bar along the bottom is the timeline. The lighter span is what keyframes
+cover and can be scrubbed to instantly; dragging outside it replays from the
+start, which is slower but always available -- the state here is a pure
+function of the step number, so a replayed step is the step.
 ";
 
 /// Where the scene comes from: a built-in preset, or a file.
@@ -112,6 +128,7 @@ struct Options {
     frames: Option<u32>,
     output_dir: PathBuf,
     save_scene: Option<PathBuf>,
+    timeline: bool,
     width: u32,
     height: u32,
     settings: ViewSettings,
@@ -128,6 +145,7 @@ impl Options {
             frames: None,
             output_dir: PathBuf::from("frames"),
             save_scene: None,
+            timeline: false,
             width: 720,
             height: 540,
             settings: ViewSettings::new(),
@@ -163,6 +181,7 @@ impl Options {
                 "--gain" => options.settings.gain = parse(&value()?, "--gain")?,
                 "--log" => options.settings.log_strength = parse(&value()?, "--log")?,
                 "--output-dir" => options.output_dir = PathBuf::from(value()?),
+                "--timeline" => options.timeline = true,
                 "--size" => {
                     let text = value()?;
                     let (width, height) = text
@@ -272,9 +291,20 @@ fn render_offscreen(options: &Options, frames: u32) -> Result<(), Box<dyn Error>
         simulation.wait();
     }
 
+    let mut settings = options.settings;
     for frame in 0..frames {
         simulation.advance_by(u64::from(options.steps_per_frame));
         simulation.wait();
+
+        // Offscreen frames are meant to be clean images, so the bar is opt-in.
+        // CI turns it on, which is what keeps that branch of the shader from
+        // being dead code that only ever runs on someone's desktop.
+        if options.timeline {
+            settings.scrub = Some(ScrubBar {
+                played: (frame + 1) as f32 / frames as f32,
+                window_start: 0.35,
+            });
+        }
 
         // Offscreen has no latency budget to protect, so the auto-range is
         // measured and consumed within the same frame. A pulse's peak can
@@ -292,7 +322,7 @@ fn render_offscreen(options: &Options, frames: u32) -> Result<(), Box<dyn Error>
             capture.view(),
             capture.size(),
             &simulation,
-            &options.settings,
+            &settings,
         );
         capture.copy_out(&mut encoder);
         let sync_point = context.submit(&mut encoder);
@@ -325,11 +355,15 @@ struct App {
     simulation: Simulation,
     encoder: gpu::CommandEncoder,
     sync_point: Option<gpu::SyncPoint>,
+    timeline: Timeline,
     running: bool,
     dragging: bool,
+    scrubbing: bool,
     cursor: Option<(f64, f64)>,
     last_frame: Instant,
     steps_per_second: f32,
+    /// Furthest step reached, which is what the scrub bar spans.
+    furthest: u64,
 }
 
 fn run_windowed(options: Options) -> Result<(), Box<dyn Error>> {
@@ -367,12 +401,18 @@ fn run_windowed(options: Options) -> Result<(), Box<dyn Error>> {
         renderer: None,
         simulation,
         encoder,
+        // A keyframe every `KEYFRAME_INTERVAL` steps, sixteen of them. On the
+        // GPU a keyframe is a full readback, so the interval is what keeps
+        // that off the per-frame path.
+        timeline: Timeline::new(KEYFRAME_INTERVAL, 16),
         sync_point: None,
         running: true,
         dragging: false,
+        scrubbing: false,
         cursor: None,
         last_frame: Instant::now(),
         steps_per_second: 0.0,
+        furthest: 0,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -418,6 +458,17 @@ impl App {
         // The solver has to have finished before its buffers are sampled: the
         // renderer reads the very same allocations the kernels write.
         self.simulation.wait();
+        if steps > 0 {
+            self.timeline.observe(&mut self.simulation);
+            self.furthest = self.furthest.max(Steppable::step_count(&self.simulation));
+        }
+        // Computed inline rather than through `self.scrub_bar()`, which would
+        // need a second borrow of `self` while `surface` is held mutably.
+        let furthest = self.furthest.max(1) as f32;
+        self.options.settings.scrub = Some(ScrubBar {
+            played: Steppable::step_count(&self.simulation) as f32 / furthest,
+            window_start: self.timeline.earliest().unwrap_or(0) as f32 / furthest,
+        });
 
         let seconds = elapsed.as_secs_f32().max(1e-6);
         let instant_rate = steps as f32 / seconds;
@@ -440,13 +491,17 @@ impl App {
         let bandwidth =
             self.steps_per_second as f64 * self.simulation.bytes_per_step() as f64 / 1e9;
         window.set_title(&format!(
-            "diaphane — {:.0} steps/s · {:.1} GB/s · {:.2} ms · t = {:.2} ns · {} · gain {:.2}{}{}",
+            "diaphane — {:.0} steps/s · {:.1} GB/s · {:.2} ms · step {} · t = {:.2} ns · \
+             {} · gain {:.2} · {} keyframes / {:.0} MB{}{}",
             self.steps_per_second,
             bandwidth,
             seconds * 1e3,
+            Steppable::step_count(&self.simulation),
             self.simulation.time() * 1e9,
             self.options.settings.mode.label(),
             self.options.settings.gain,
+            self.timeline.keyframe_count(),
+            self.timeline.bytes() as f64 / 1e6,
             if self.options.settings.log_strength > 0.0 {
                 " · log"
             } else {
@@ -456,12 +511,49 @@ impl App {
         ));
     }
 
+    fn surface_size(&self) -> gpu::Extent {
+        self.window
+            .as_ref()
+            .map(|window| Self::surface_config(window.inner_size()).size)
+            .unwrap_or_default()
+    }
+
+    /// Moves to a fraction of the run so far.
+    ///
+    /// Pauses on the way, because a slider that keeps advancing under the
+    /// pointer is not a slider.
+    fn scrub_to(&mut self, fraction: f32) {
+        let target = (fraction.clamp(0.0, 1.0) * self.furthest as f32).round() as u64;
+        if target == Steppable::step_count(&self.simulation) {
+            return;
+        }
+        self.running = false;
+        let outcome = self.timeline.seek(&mut self.simulation, target);
+        if outcome.replayed() > 0 {
+            log::debug!("seek to {target}: {outcome:?}");
+        }
+    }
+
+    /// Jumps by whole keyframe intervals, which is the granularity that never
+    /// costs more than one interval of replay.
+    fn nudge(&mut self, intervals: i64) {
+        let current = Steppable::step_count(&self.simulation) as i64;
+        let target =
+            (current + intervals * KEYFRAME_INTERVAL as i64).clamp(0, self.furthest as i64) as u64;
+        self.running = false;
+        self.timeline.seek(&mut self.simulation, target);
+    }
+
     fn on_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
         let settings = &mut self.options.settings;
         match code {
             KeyCode::Escape => event_loop.exit(),
             KeyCode::Space => self.running = !self.running,
-            KeyCode::KeyR => self.simulation.reset(),
+            KeyCode::KeyR => {
+                self.simulation.reset();
+                self.timeline.clear();
+                self.furthest = 0;
+            }
             KeyCode::KeyL => {
                 settings.log_strength = if settings.log_strength > 0.0 {
                     0.0
@@ -478,6 +570,9 @@ impl App {
             }
             KeyCode::Minus => settings.gain = (settings.gain / 1.3).max(1e-3),
             KeyCode::Equal => settings.gain = (settings.gain * 1.3).min(1e4),
+            KeyCode::BracketLeft => self.nudge(-1),
+            KeyCode::BracketRight => self.nudge(1),
+            KeyCode::Home => self.scrub_to(0.0),
             KeyCode::Digit1 => settings.mode = ViewMode::ALL[0],
             KeyCode::Digit2 => settings.mode = ViewMode::ALL[1],
             KeyCode::Digit3 => settings.mode = ViewMode::ALL[2],
@@ -546,13 +641,31 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Left {
-                    self.dragging = state == ElementState::Pressed;
+                if button != MouseButton::Left {
+                    return;
+                }
+                let pressed = state == ElementState::Pressed;
+                // Which gesture this is gets decided on press and held until
+                // release, so a scrub that wanders off the bar keeps scrubbing
+                // rather than suddenly spinning the camera.
+                if pressed && let Some((x, y)) = self.cursor {
+                    let size = self.surface_size();
+                    self.scrubbing = ScrubBar::contains(y, size.height);
+                    if self.scrubbing {
+                        self.scrub_to(ScrubBar::fraction_at(x, size.width));
+                    }
+                }
+                self.dragging = pressed;
+                if !pressed {
+                    self.scrubbing = false;
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let current = (position.x, position.y);
-                if self.dragging
+                if self.dragging && self.scrubbing {
+                    let width = self.surface_size().width;
+                    self.scrub_to(ScrubBar::fraction_at(current.0, width));
+                } else if self.dragging
                     && let Some(previous) = self.cursor
                 {
                     let delta = (current.0 - previous.0, current.1 - previous.1);

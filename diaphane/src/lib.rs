@@ -21,6 +21,7 @@
 //! - [`boundary`] -- what happens at the walls.
 //! - [`source`] -- why a source has to be soft and zero-mean.
 //! - [`scene`] -- everything needed to reproduce a run.
+//! - [`timeline`] -- keyframes, and why a time slider works at all.
 //!
 //! # Getting started
 //!
@@ -45,6 +46,7 @@ pub mod grid;
 pub mod material;
 pub mod scene;
 pub mod source;
+pub mod timeline;
 
 pub use boundary::Boundary;
 pub use grid::{Axis, Extent, Grid};

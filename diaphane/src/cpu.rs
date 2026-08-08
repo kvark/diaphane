@@ -25,6 +25,7 @@ use crate::{
     material::{Coefficients, MaterialTable},
     scene::Scene,
     source::Source,
+    timeline::{Snapshot, Steppable},
 };
 
 /// Field energy, split into its two halves.
@@ -451,6 +452,43 @@ impl Simulation {
             .chain(self.magnetic.iter())
             .flat_map(|field| field.iter())
             .all(|v| v.is_finite())
+    }
+}
+
+impl Steppable for Simulation {
+    fn step_count(&self) -> u64 {
+        self.step
+    }
+
+    fn advance_by(&mut self, steps: u64) {
+        Self::advance_by(self, steps);
+    }
+
+    fn reset(&mut self) {
+        Self::reset(self);
+    }
+
+    fn snapshot(&mut self) -> Snapshot {
+        Snapshot {
+            step: self.step,
+            electric: self.electric.concat(),
+            magnetic: self.magnetic.concat(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: &Snapshot) {
+        let cells = self.grid.extent.total();
+        assert_eq!(
+            snapshot.electric.len(),
+            3 * cells,
+            "snapshot was taken from a different grid"
+        );
+        for axis in 0..3 {
+            let range = axis * cells..(axis + 1) * cells;
+            self.electric[axis].copy_from_slice(&snapshot.electric[range.clone()]);
+            self.magnetic[axis].copy_from_slice(&snapshot.magnetic[range]);
+        }
+        self.step = snapshot.step;
     }
 }
 

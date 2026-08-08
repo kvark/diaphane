@@ -23,7 +23,9 @@
 use diaphane::{
     Axis, Boundary, Extent, Material, Scene, Shape, Source, Waveform, cpu,
     gpu::{self, headless_context},
+    timeline::{Steppable, Timeline},
 };
+use std::sync::Arc;
 
 fn peak_of(values: &[f32]) -> f32 {
     values.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()))
@@ -207,5 +209,46 @@ fn resetting_clears_the_device_buffers() {
     assert!(
         cleared.iter().all(|&v| v == 0.0),
         "reset left a field behind"
+    );
+}
+
+#[test]
+fn a_timeline_scrubs_the_gpu_solver() {
+    // On the GPU a snapshot is a full readback and a restore a full upload, so
+    // this exercises the path in both directions -- and checks that arriving
+    // at a step by replay is indistinguishable from having stepped there,
+    // which is the property the whole slider rests on.
+    let Ok(context) = headless_context() else {
+        eprintln!("skipping: no usable GPU device");
+        return;
+    };
+    let scene = Scene::photon(Extent::cube(32));
+
+    let mut reference = gpu::Simulation::new(Arc::clone(&context), &scene);
+    reference.advance_by(70);
+    let expected = reference.read_electric();
+
+    let mut simulation = gpu::Simulation::new(context, &scene);
+    let mut timeline = Timeline::new(25, 8);
+    for _ in 0..120 {
+        simulation.advance_by(1);
+        timeline.observe(&mut simulation);
+    }
+    assert!(timeline.keyframe_count() > 1);
+
+    timeline.seek(&mut simulation, 70);
+    assert_eq!(Steppable::step_count(&simulation), 70);
+
+    let scrubbed = simulation.read_electric();
+    let peak = expected.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+    let worst = expected
+        .iter()
+        .zip(scrubbed.iter())
+        .fold(0.0f32, |acc, (&a, &b)| acc.max((a - b).abs()));
+    assert!(peak > 0.0);
+    assert!(
+        worst < 1e-5 * peak,
+        "scrubbed state differs from the stepped one by {:e} of the peak",
+        worst / peak
     );
 }

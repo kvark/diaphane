@@ -34,6 +34,7 @@ use crate::{
     grid::{Axis, Grid},
     scene::Scene,
     source::Source,
+    timeline::{Snapshot, Steppable},
 };
 use blade_graphics as gpu;
 use std::{mem, ptr, sync::Arc};
@@ -395,6 +396,45 @@ impl Simulation {
         &values[axis.index() * cells..(axis.index() + 1) * cells]
     }
 
+    /// Uploads a field back to the device, for [`Steppable::restore`].
+    ///
+    /// Goes through the host-visible readback buffer in the other direction
+    /// rather than allocating a staging buffer per call — a restore happens on
+    /// a seek, not in the render loop.
+    fn write(&mut self, destination: gpu::Buffer, values: &[f32]) {
+        self.wait();
+        assert_eq!(
+            values.len(),
+            3 * self.grid.extent.total(),
+            "snapshot was taken from a different grid"
+        );
+        // SAFETY: `readback` is host-visible, holds exactly `field_bytes`, and
+        // the wait above means no submitted command is still reading it.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                values.as_ptr(),
+                self.buffers.readback.data().cast::<f32>(),
+                values.len(),
+            );
+        }
+        self.context.sync_buffer(self.buffers.readback);
+
+        self.encoder.start();
+        {
+            let mut pass = self.encoder.transfer("restore");
+            pass.copy_buffer_to_buffer(
+                self.buffers.readback.into(),
+                destination.into(),
+                self.field_bytes,
+            );
+        }
+        let sync_point = self.context.submit(&mut self.encoder);
+        self.context
+            .wait_for(&sync_point, Self::TIMEOUT_MS)
+            .expect("restore failed");
+        self.sync_point = Some(sync_point);
+    }
+
     fn read(&mut self, source: gpu::Buffer) -> Vec<f32> {
         self.wait();
         self.encoder.start();
@@ -420,6 +460,37 @@ impl Simulation {
             std::slice::from_raw_parts(self.buffers.readback.data().cast::<f32>(), count)
         };
         mapped.to_vec()
+    }
+}
+
+/// Snapshots are a full readback and restores a full upload, which is why a
+/// [`crate::timeline::Timeline`] takes them on keyframe boundaries rather than
+/// every step.
+impl Steppable for Simulation {
+    fn step_count(&self) -> u64 {
+        self.step
+    }
+
+    fn advance_by(&mut self, steps: u64) {
+        Self::advance_by(self, steps);
+    }
+
+    fn reset(&mut self) {
+        Self::reset(self);
+    }
+
+    fn snapshot(&mut self) -> Snapshot {
+        Snapshot {
+            step: self.step,
+            electric: self.read_electric(),
+            magnetic: self.read_magnetic(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: &Snapshot) {
+        self.write(self.buffers.electric, &snapshot.electric);
+        self.write(self.buffers.magnetic, &snapshot.magnetic);
+        self.step = snapshot.step;
     }
 }
 
