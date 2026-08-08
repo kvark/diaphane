@@ -137,8 +137,11 @@ fn main_vs(@builtin(vertex_index) index: u32) -> VertexOutput {
     let ndc = corner * 2.0 - 1.0;
     var out: VertexOutput;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
-    // Clip space has y downwards; the camera basis does not.
-    out.screen = vec2<f32>(ndc.x, -ndc.y);
+    // Passed straight through: blade flips the viewport, so +y in clip space
+    // is already up on screen. Negating here -- the reflex, because Vulkan
+    // clip space is nominally y-down -- mirrors the whole render vertically,
+    // which on a symmetric wave packet in a cube looks like nothing at all.
+    out.screen = ndc;
     return out;
 }
 
