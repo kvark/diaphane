@@ -501,32 +501,49 @@ impl Simulation {
     /// Accumulated in `f64`: the point of this quantity is to detect drift
     /// over 10⁵ steps, and an `f32` accumulator over a million cells would
     /// lose more precision than the drift being measured.
+    /// # Every component gets its own volume
+    ///
+    /// Not one volume per cell. The six components sit at six different places
+    /// (see [`crate::grid`]), so they are integrated over six different boxes:
+    /// `E[a]` spans a whole cell along `a` and half cells across it, and `H[a]`
+    /// is the mirror. Those are the primary and dual widths, and which one goes
+    /// where is the same rule the curl updates follow.
+    ///
+    /// On a uniform grid all six boxes are the same cube and none of this
+    /// matters. On a graded one, using a single per-cell volume measures a
+    /// quantity the scheme does *not* conserve: as a cavity mode sloshes energy
+    /// between coarse and fine regions the total wanders, here by 0.2% over
+    /// 20,000 steps — which reads exactly like the secular drift this function
+    /// exists to detect, and is not.
     pub fn energy(&self) -> Energy {
         let extent = self.grid.extent.as_array();
-        let widths = Axis::ALL.map(|axis| self.grid.spacing(axis).primary());
+        let primary = Axis::ALL.map(|axis| self.grid.spacing(axis).primary());
+        let dual = Axis::ALL.map(|axis| self.grid.spacing(axis).dual());
         let mut energy = Energy::default();
         for z in 0..extent[2] {
             for y in 0..extent[1] {
-                // The cell volume factorizes across the axes, so two thirds of
-                // it is fixed for the row.
-                let slab = f64::from(widths[1][y]) * f64::from(widths[2][z]);
                 let row = (z * extent[1] + y) * extent[0];
-                for (x, &width) in widths[0].iter().enumerate() {
+                for x in 0..extent[0] {
                     let index = row + x;
-                    let volume = slab * f64::from(width);
+                    let coord = [x, y, z];
                     let material = self.materials.get(self.material_index[index]);
-                    let mut electric = 0.0f32;
-                    let mut magnetic = 0.0f32;
                     for axis in 0..3 {
+                        let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
                         let e = self.electric[axis][index];
                         let h = self.magnetic[axis][index];
-                        electric += e * e;
-                        magnetic += h * h;
+                        let electric_volume = f64::from(primary[axis][coord[axis]])
+                            * f64::from(dual[b][coord[b]])
+                            * f64::from(dual[c][coord[c]]);
+                        let magnetic_volume = f64::from(dual[axis][coord[axis]])
+                            * f64::from(primary[b][coord[b]])
+                            * f64::from(primary[c][coord[c]]);
+                        energy.electric += 0.5
+                            * electric_volume
+                            * f64::from(material.relative_permittivity * e * e);
+                        energy.magnetic += 0.5
+                            * magnetic_volume
+                            * f64::from(material.relative_permeability * h * h);
                     }
-                    energy.electric +=
-                        0.5 * volume * f64::from(material.relative_permittivity * electric);
-                    energy.magnetic +=
-                        0.5 * volume * f64::from(material.relative_permeability * magnetic);
                 }
             }
         }

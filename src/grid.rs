@@ -152,13 +152,14 @@ pub struct Spacing {
     dual: Vec<f32>,
     /// Corner positions from the low edge; `primary.len() + 1` of them.
     ///
-    /// In `f64`, and the corners are where a graded grid would otherwise leak
-    /// precision into places nothing else touches. A running sum of a few
-    /// hundred `f32` widths drifts by enough to land a source one cell over —
-    /// which reads as a physics bug, not an arithmetic one. These are three
-    /// short 1D arrays built once, so the wider type costs nothing that
-    /// matters.
-    corners: Vec<f64>,
+    /// `f32`, like everything else — but *summed* in `f64`, which is not the
+    /// same thing. A running `f32` sum of a few hundred widths accumulates
+    /// error proportional to the count, and a scene position sitting exactly on
+    /// a cell boundary (0, ±8 mm — that is most of them) then lands on the
+    /// wrong side of it. Rounding once per corner instead of once per addition
+    /// makes the error a single ulp regardless of how many cells there are, for
+    /// the price of a wider accumulator in one setup loop.
+    corners: Vec<f32>,
 }
 
 impl Spacing {
@@ -170,23 +171,25 @@ impl Spacing {
         // exactly the corners it would have had before there was such a thing
         // as a `Spacing` — including the domain centre falling on a corner,
         // which is what makes `to_position(to_cell(p)) == p` hold to the bit.
-        let corners = (0..=count).map(|i| i as f64 * f64::from(width)).collect();
+        let corners = (0..=count)
+            .map(|i| (i as f64 * f64::from(width)) as f32)
+            .collect();
         Self::assemble(vec![width; count], corners)
     }
 
     /// Arbitrary cell widths, low edge first.
     pub fn from_widths(primary: Vec<f32>) -> Self {
         let mut corners = Vec::with_capacity(primary.len() + 1);
-        let mut offset = 0.0;
-        corners.push(offset);
+        let mut offset = 0.0f64;
+        corners.push(0.0);
         for &width in &primary {
             offset += f64::from(width);
-            corners.push(offset);
+            corners.push(offset as f32);
         }
         Self::assemble(primary, corners)
     }
 
-    fn assemble(primary: Vec<f32>, corners: Vec<f64>) -> Self {
+    fn assemble(primary: Vec<f32>, corners: Vec<f32>) -> Self {
         assert!(
             primary.len() >= 2,
             "an axis needs at least 2 cells, got {}",
@@ -226,10 +229,6 @@ impl Spacing {
 
     /// Total length of the axis, in metres.
     pub fn length(&self) -> f32 {
-        self.span() as f32
-    }
-
-    fn span(&self) -> f64 {
         self.corners[self.corners.len() - 1]
     }
 
@@ -256,20 +255,19 @@ impl Spacing {
     /// Position of a possibly fractional cell coordinate, measured from the
     /// *centre* of the axis.
     ///
-    /// Centred here rather than in the caller so that the half-length is
-    /// subtracted in `f64`, against the same corners the forward map uses. Do
-    /// it in `f32` outside and the domain centre stops landing exactly on the
-    /// corner it is, which is a fraction of a cell — right up until it is the
-    /// wrong side of one.
+    /// Centred here rather than in the caller so that the half-length is taken
+    /// against the same corners the forward map uses. Done independently
+    /// outside, the domain centre stops landing exactly on the corner it is —
+    /// a fraction of a cell, right up until it is the wrong side of one.
     pub fn position(&self, coordinate: f32) -> f32 {
-        (self.offset_of(coordinate) - 0.5 * self.span()) as f32
+        self.offset_of(coordinate) - 0.5 * self.length()
     }
 
     /// Cell coordinate of a position measured from the centre — the inverse of
     /// [`Self::position`], which on a graded axis is a search rather than a
     /// division.
     pub fn coordinate(&self, position: f32) -> f32 {
-        let offset = f64::from(position) + 0.5 * self.span();
+        let offset = position + 0.5 * self.length();
         // `partition_point` gives the first corner strictly past `offset`, so
         // one less is the cell containing it.
         let index = self
@@ -277,13 +275,13 @@ impl Spacing {
             .partition_point(|&corner| corner <= offset)
             .saturating_sub(1)
             .min(self.primary.len() - 1);
-        (index as f64 + (offset - self.corners[index]) / f64::from(self.primary[index])) as f32
+        index as f32 + (offset - self.corners[index]) / self.primary[index]
     }
 
-    fn offset_of(&self, coordinate: f32) -> f64 {
+    fn offset_of(&self, coordinate: f32) -> f32 {
         let last = self.primary.len() - 1;
         let index = (coordinate.floor().max(0.0) as usize).min(last);
-        self.corners[index] + f64::from(coordinate - index as f32) * f64::from(self.primary[index])
+        self.corners[index] + (coordinate - index as f32) * self.primary[index]
     }
 }
 
@@ -433,12 +431,26 @@ impl Grid {
     /// it would have had without them, so adding one does not move the
     /// geometry or the absorbing layer.
     pub fn graded(size: [f32; 3], resolution: f32, refinements: Vec<Refinement>) -> Self {
+        Self::graded_at(size, resolution, refinements, default_max_ratio())
+    }
+
+    /// The same, with an explicit growth cap.
+    ///
+    /// Worth reaching for: how fast the spacing changes is what a grading
+    /// transition reflects off, and the two are measurably related — see
+    /// `tests/graded.rs`.
+    pub fn graded_at(
+        size: [f32; 3],
+        resolution: f32,
+        refinements: Vec<Refinement>,
+        max_ratio: f32,
+    ) -> Self {
         Self::build(
             Self::extent_for(size, resolution),
             1.0 / resolution,
             0.5,
             refinements,
-            default_max_ratio(),
+            max_ratio,
         )
     }
 

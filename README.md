@@ -55,9 +55,16 @@ refining a box refines the slabs it projects onto, all the way through. Right
 for films, layered stacks, wires and boundary layers.
 
 The grading is capped at 1.15× between neighbouring cells, because a centred
-difference is only centred where the spacing is not moving. The cap is
-asserted, the transition is measured to reflect below −40 dB, and a graded
-lossless box is required to hold its energy over 20,000 steps.
+difference is only centred where the spacing is not moving. A graded run agrees
+with a uniformly fine one to 0.6% of peak, and a graded lossless box holds its
+energy over 20,000 steps.
+
+The honest cost: a change of spacing is a change of numerical phase velocity,
+so a wave crossing one partially reflects off nothing physical. Measured at
+**−32.5 dB** at the default cap — about 25 dB louder than the absorbing walls,
+which makes the mesh the loudest artifact in a refined scene. Grading at 1.05
+instead measures −52.4 dB and costs about a third of the cell saving. That is
+why `max_ratio` is in the scene file.
 
 ## Time
 
