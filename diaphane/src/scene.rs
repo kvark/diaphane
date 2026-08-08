@@ -12,55 +12,91 @@ use crate::{
     source::{Source, Waveform},
 };
 
+/// Cell size the built-in presets are defined at: one millimetre.
+const PRESET_CELL_SIZE: f32 = 1e-3;
+
 /// A primitive painted into the material index.
+///
+/// # Everything is in metres, with the origin at the centre of the domain
+///
+/// Not cell indices. Geometry written in cells is welded to one resolution:
+/// change the cell size and every object moves, so you cannot run the same
+/// scene at twice the resolution to check the answer stopped changing — which
+/// is the single most useful thing a saved scene enables. See
+/// [`Grid::to_cell`] for why the origin is the centre rather than a corner.
 ///
 /// Later shapes overwrite earlier ones, so a scene reads top to bottom like a
 /// stack of paint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Shape {
-    /// Axis-aligned box, inclusive of `min` and exclusive of `max`.
+    /// Axis-aligned box given by its centre and its full side lengths.
+    ///
+    /// Centre-and-size rather than min-and-max because it is what survives a
+    /// change of domain size unchanged, and because it is how every photonics
+    /// tool states a box.
     Block {
-        min: [u32; 3],
-        max: [u32; 3],
+        center: [f32; 3],
+        size: [f32; 3],
         material: u32,
     },
-    /// Sphere, in cell coordinates.
     Sphere {
         center: [f32; 3],
         radius: f32,
         material: u32,
     },
-    /// A slab filling the domain except along `axis`, where it spans
-    /// `start..end`.
+    /// A slab spanning the whole domain except along `axis`, where it is
+    /// `thickness` metres thick and centred at `offset`.
     Slab {
         axis: Axis,
-        start: u32,
-        end: u32,
+        offset: f32,
+        thickness: f32,
         material: u32,
     },
 }
 
 impl Shape {
-    /// Whether a cell is inside this shape.
-    fn contains(&self, coord: [usize; 3]) -> bool {
+    /// Whether a physical position is inside this shape.
+    fn contains(&self, position: [f32; 3]) -> bool {
         match *self {
-            Self::Block { min, max, .. } => (0..3)
-                .all(|axis| coord[axis] >= min[axis] as usize && coord[axis] < max[axis] as usize),
+            Self::Block { center, size, .. } => {
+                (0..3).all(|axis| (position[axis] - center[axis]).abs() <= 0.5 * size[axis])
+            }
             Self::Sphere { center, radius, .. } => {
                 let distance_squared: f32 = (0..3)
                     .map(|axis| {
-                        let d = coord[axis] as f32 + 0.5 - center[axis];
-                        d * d
+                        let offset = position[axis] - center[axis];
+                        offset * offset
                     })
                     .sum();
                 distance_squared <= radius * radius
             }
             Self::Slab {
-                axis, start, end, ..
+                axis,
+                offset,
+                thickness,
+                ..
+            } => (position[axis.index()] - offset).abs() <= 0.5 * thickness,
+        }
+    }
+
+    /// Half-extent of the shape along each axis, measured from its centre.
+    /// A slab is unbounded in its two transverse directions.
+    fn bounds(&self) -> ([f32; 3], [f32; 3]) {
+        match *self {
+            Self::Block { center, size, .. } => (center, size.map(|s| 0.5 * s)),
+            Self::Sphere { center, radius, .. } => (center, [radius; 3]),
+            Self::Slab {
+                axis,
+                offset,
+                thickness,
+                ..
             } => {
-                let c = coord[axis.index()];
-                c >= start as usize && c < end as usize
+                let mut center = [0.0; 3];
+                center[axis.index()] = offset;
+                let mut half = [f32::INFINITY; 3];
+                half[axis.index()] = 0.5 * thickness;
+                (center, half)
             }
         }
     }
@@ -86,14 +122,44 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// An empty domain with absorbing walls and no sources.
+    /// An empty domain of the given physical size, at `resolution` cells per
+    /// metre, with absorbing walls and no sources.
+    ///
+    /// This is the constructor to author against. [`Self::empty`] is the
+    /// grid-level one, for when the exact cell count is what matters.
+    pub fn sized(size: [f32; 3], resolution: f32) -> Self {
+        Self::on_grid(Grid::for_size(size, resolution))
+    }
+
+    /// An empty domain on an explicitly chosen grid.
     pub fn empty(extent: Extent, cell_size: f32) -> Self {
+        Self::on_grid(Grid::new(extent, cell_size))
+    }
+
+    fn on_grid(grid: Grid) -> Self {
         Self {
-            grid: Grid::new(extent, cell_size),
+            grid,
             boundary: Boundary::DEFAULT,
             materials: MaterialTable::new(),
             shapes: Vec::new(),
             sources: Vec::new(),
+        }
+    }
+
+    /// The same physical scene, rediscretized at `resolution` cells per metre.
+    ///
+    /// Nothing moves: geometry and sources are in metres, so only the grid
+    /// changes. This is what makes a convergence study a one-liner — run the
+    /// same scene at 1x and 2x and see whether the answer stopped changing.
+    /// It is also the check that catches an under-resolved result, which
+    /// otherwise looks entirely convincing.
+    pub fn with_resolution(&self, resolution: f32) -> Self {
+        Self {
+            grid: Grid {
+                courant: self.grid.courant,
+                ..Grid::for_size(self.grid.size(), resolution)
+            },
+            ..self.clone()
         }
     }
 
@@ -123,8 +189,14 @@ impl Scene {
             for y in 0..ny {
                 for x in 0..nx {
                     let coord = [x, y, z];
+                    // Membership is decided at the cell centre. Subpixel
+                    // smoothing -- averaging the permittivity across a
+                    // partially filled cell -- is the highest-leverage
+                    // accuracy upgrade available here, and this is the line it
+                    // would replace.
+                    let position = self.grid.cell_center(coord);
                     for shape in self.shapes.iter() {
-                        if shape.contains(coord) {
+                        if shape.contains(position) {
                             indices[self.grid.extent.index(coord)] = shape.material();
                         }
                     }
@@ -155,12 +227,34 @@ impl Scene {
                 ));
             }
         }
+        for source in self.sources.iter() {
+            let position = source.position();
+            if !self.grid.contains(position) {
+                let size = self.grid.size();
+                return Err(format!(
+                    "source at {position:?} m is outside the {size:?} m domain; \
+                     positions are in metres from the centre, not cell indices"
+                ));
+            }
+        }
         for shape in self.shapes.iter() {
             if shape.material() as usize >= self.materials.len() {
                 return Err(format!(
                     "shape references material {} but the table has {}",
                     shape.material(),
                     self.materials.len()
+                ));
+            }
+            // A shape entirely outside the domain paints nothing, and after
+            // the move to metres the way that happens is passing cell indices
+            // by mistake. Silently rendering an empty scene is the worst
+            // possible response to that.
+            let (center, half) = shape.bounds();
+            let size = self.grid.size();
+            if (0..3).any(|axis| center[axis].abs() - half[axis] > 0.5 * size[axis]) {
+                return Err(format!(
+                    "shape centred at {center:?} m lies entirely outside the \
+                     {size:?} m domain; positions are in metres from the centre"
                 ));
             }
         }
@@ -173,28 +267,33 @@ impl Scene {
     /// The packet is polarized along `z` and travels along `x`, so `Ez` and
     /// `Hy` carry it and the exchange between them is visible side-on.
     pub fn photon(extent: Extent) -> Self {
-        let cell_size = 1e-3;
-        let grid = Grid::new(extent, cell_size);
+        // The presets take a cell count because that is what sets the cost of
+        // a run, and pin the resolution at a millimetre per cell — so `extent`
+        // reads as "how many millimetres across". To refine one instead of
+        // enlarging it, call [`Self::with_resolution`].
+        let grid = Grid::new(extent, PRESET_CELL_SIZE);
+        let size = grid.size();
         // Sixteen cells per wavelength: numerical dispersion stays a fraction
         // of a percent, and the packet is short enough to be an object in the
         // box rather than filling it.
         let frequency = grid.frequency_for_resolution(16.0);
-        let waist = 0.25 * extent.y.min(extent.z) as f32;
         Self {
-            grid,
             boundary: Boundary::DEFAULT,
             materials: MaterialTable::new(),
             shapes: Vec::new(),
             sources: vec![Source::sheet(
                 Axis::X,
-                extent.x / 5,
-                waist,
+                // A fifth of the way in from the low wall, which with a centred
+                // origin is three tenths back from the middle.
+                -0.3 * size[0],
+                0.25 * size[1].min(size[2]),
                 Axis::Z,
-                // Two cycles. Longer and the packet is no longer a packet --
-                // at four it is eighty cells from end to end, which is most of
-                // a usable domain.
+                // Two cycles. Longer and the packet is no longer a packet — at
+                // four it is eighty cells from end to end, which is most of a
+                // usable domain.
                 Waveform::gaussian_pulse(frequency, 2.0),
             )],
+            grid,
         }
     }
 
@@ -205,18 +304,21 @@ impl Scene {
     /// densities alternate in place, which is the clearest view of the two
     /// fields trading energy back and forth.
     pub fn cavity(extent: Extent) -> Self {
-        let cell_size = 1e-3;
-        let grid = Grid::new(extent, cell_size);
+        let grid = Grid::new(extent, PRESET_CELL_SIZE);
+        let size = grid.size();
         let frequency = grid.frequency_for_resolution(16.0);
-        // Off-centre so the dipole is not sitting on a node of every mode it
-        // would otherwise excite.
-        let at = [extent.x / 3, extent.y / 2, extent.z / 2];
         Self {
-            grid,
             boundary: Boundary::Pec,
             materials: MaterialTable::new(),
             shapes: Vec::new(),
-            sources: vec![Source::point(at, Axis::Z, Waveform::ricker(frequency))],
+            sources: vec![Source::point(
+                // Off-centre, so the dipole is not sitting on a node of every
+                // mode it would otherwise excite.
+                [-size[0] / 6.0, 0.0, 0.0],
+                Axis::Z,
+                Waveform::ricker(frequency),
+            )],
+            grid,
         }
     }
 
@@ -224,11 +326,12 @@ impl Scene {
     /// refracts, and the wavelength visibly shortens inside the glass.
     pub fn slab(extent: Extent, refractive_index: f32) -> Self {
         let mut scene = Self::photon(extent);
+        let size = scene.grid.size();
         let material = scene.materials.push(Material::refractive(refractive_index));
         scene.shapes.push(Shape::Slab {
             axis: Axis::X,
-            start: extent.x / 2,
-            end: extent.x * 3 / 4,
+            offset: size[0] / 8.0,
+            thickness: size[0] / 4.0,
             material,
         });
         // Keep the resolution inside the glass too, where the wavelength is
@@ -249,6 +352,7 @@ mod tests {
         boundary::Boundary,
         grid::{Axis, Extent},
         material::{Material, MaterialTable},
+        source::{Source, Waveform},
     };
 
     #[test]
@@ -265,14 +369,15 @@ mod tests {
         let mut scene = Scene::empty(Extent::cube(16), 1e-3);
         let glass = scene.materials.push(Material::refractive(1.5));
         let metal = scene.materials.push(Material::PERFECT_CONDUCTOR);
+        // A 16 mm box at 1 mm per cell: the domain runs from -8 mm to +8 mm.
         scene.shapes.push(Shape::Block {
-            min: [4, 4, 4],
-            max: [12, 12, 12],
+            center: [0.0; 3],
+            size: [8e-3; 3],
             material: glass,
         });
         scene.shapes.push(Shape::Sphere {
-            center: [8.0, 8.0, 8.0],
-            radius: 2.0,
+            center: [0.0; 3],
+            radius: 2e-3,
             material: metal,
         });
 
@@ -290,10 +395,11 @@ mod tests {
     fn slab_shape_spans_one_axis_only() {
         let mut scene = Scene::empty(Extent::cube(12), 1e-3);
         let glass = scene.materials.push(Material::refractive(2.0));
+        // 12 cells at 1 mm spans -6 mm to +6 mm; cells 3..6 are -2.5..-0.5 mm.
         scene.shapes.push(Shape::Slab {
             axis: Axis::Y,
-            start: 3,
-            end: 6,
+            offset: -1.5e-3,
+            thickness: 3e-3,
             material: glass,
         });
         let indices = scene.material_indices();
@@ -310,7 +416,7 @@ mod tests {
         // Ten times the frequency is half a wavelength per cell: nonsense.
         for source in scene.sources.iter_mut() {
             let frequency = scene.grid.frequency_for_resolution(2.0);
-            source.waveform = crate::source::Waveform::ricker(frequency);
+            source.waveform = Waveform::ricker(frequency);
         }
         let error = scene.validate().unwrap_err();
         assert!(error.contains("cells per wavelength"), "{error}");
@@ -320,11 +426,102 @@ mod tests {
     fn validation_rejects_a_dangling_material_reference() {
         let mut scene = Scene::empty(Extent::cube(8), 1e-3);
         scene.shapes.push(Shape::Block {
-            min: [0, 0, 0],
-            max: [2, 2, 2],
+            center: [0.0; 3],
+            size: [2e-3; 3],
             material: 7,
         });
         assert!(scene.validate().unwrap_err().contains("material 7"));
+    }
+
+    #[test]
+    fn geometry_occupies_the_same_volume_at_any_resolution() {
+        // The whole point of metres. If geometry were still in cell indices,
+        // doubling the resolution would halve every object's physical size and
+        // these fractions would fall by 8x.
+        let mut scene = Scene::sized([0.032; 3], 1000.0);
+        let glass = scene.materials.push(Material::refractive(1.5));
+        let metal = scene.materials.push(Material::PERFECT_CONDUCTOR);
+        scene.shapes.push(Shape::Sphere {
+            center: [4e-3, -2e-3, 0.0],
+            radius: 6e-3,
+            material: glass,
+        });
+        scene.shapes.push(Shape::Block {
+            center: [-8e-3, 0.0, 0.0],
+            size: [4e-3, 8e-3, 8e-3],
+            material: metal,
+        });
+
+        let fraction = |scene: &Scene, material: u32| {
+            let indices = scene.material_indices();
+            indices.iter().filter(|&&i| i == material).count() as f64 / indices.len() as f64
+        };
+        for material in [glass, metal] {
+            let coarse = fraction(&scene, material);
+            let fine = fraction(&scene.with_resolution(2000.0), material);
+            assert!(coarse > 0.001, "material {material} painted nothing");
+            // Only the staircase at the surface differs, and refining shrinks
+            // it, so the volumes agree to a couple of percent.
+            let difference = (fine - coarse).abs() / coarse;
+            assert!(
+                difference < 0.03,
+                "material {material} occupies {coarse:.4} coarse vs {fine:.4} fine"
+            );
+        }
+        assert_eq!(scene.with_resolution(2000.0).grid.extent, Extent::cube(64));
+    }
+
+    #[test]
+    fn sources_keep_their_physical_position_across_resolutions() {
+        let mut scene = Scene::sized([0.032; 3], 1000.0);
+        scene.sources.push(Source::point(
+            [8e-3, -4e-3, 0.0],
+            Axis::Z,
+            Waveform::ricker(scene.grid.frequency_for_resolution(20.0)),
+        ));
+        let fine = scene.with_resolution(2000.0);
+
+        let coarse_cell = scene.sources[0].injection(&scene.grid, 0.0).origin;
+        let fine_cell = fine.sources[0].injection(&fine.grid, 0.0).origin;
+        // Same place in metres means twice the cell index at twice the
+        // resolution, to within the cell the position falls in.
+        for axis in 0..3 {
+            let expected = 2 * coarse_cell[axis];
+            assert!(
+                fine_cell[axis].abs_diff(expected) <= 1,
+                "axis {axis}: coarse cell {} became {}",
+                coarse_cell[axis],
+                fine_cell[axis]
+            );
+        }
+    }
+
+    #[test]
+    fn validation_catches_geometry_written_in_cells_by_mistake() {
+        // The failure mode this whole change introduces: passing what used to
+        // be a cell index into a field that now wants metres. A sphere at
+        // "20" is twenty metres out and paints nothing at all.
+        let mut scene = Scene::sized([0.032; 3], 1000.0);
+        let glass = scene.materials.push(Material::refractive(1.5));
+        scene.shapes.push(Shape::Sphere {
+            center: [20.0, 20.0, 20.0],
+            radius: 5.0,
+            material: glass,
+        });
+        let error = scene.validate().unwrap_err();
+        assert!(error.contains("entirely outside"), "{error}");
+    }
+
+    #[test]
+    fn validation_catches_a_source_outside_the_domain() {
+        let mut scene = Scene::sized([0.032; 3], 1000.0);
+        scene.sources.push(Source::point(
+            [20.0, 0.0, 0.0],
+            Axis::Z,
+            Waveform::ricker(scene.grid.frequency_for_resolution(20.0)),
+        ));
+        let error = scene.validate().unwrap_err();
+        assert!(error.contains("outside"), "{error}");
     }
 
     #[test]

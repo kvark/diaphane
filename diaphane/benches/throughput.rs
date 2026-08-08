@@ -20,8 +20,11 @@ const BYTES_PER_CELL_STEP: u64 = 6 * 4 * 2;
 fn free_space(extent: Extent, boundary: Boundary) -> Scene {
     let scene = Scene::empty(extent, 1e-3).with_boundary(boundary);
     let frequency = scene.grid.frequency_for_resolution(20.0);
-    let center = [extent.x / 2, extent.y / 2, extent.z / 2];
-    scene.with_source(Source::point(center, Axis::Z, Waveform::ricker(frequency)))
+    scene.with_source(Source::point(
+        [0.0; 3],
+        Axis::Z,
+        Waveform::ricker(frequency),
+    ))
 }
 
 fn cpu_solver(criterion: &mut Criterion) {

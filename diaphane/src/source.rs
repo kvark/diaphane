@@ -127,24 +127,25 @@ impl Waveform {
 }
 
 /// Where a source deposits its energy.
+///
+/// Positions are in metres from the centre of the domain, like [`crate::Shape`]
+/// and for the same reason: a source pinned to a cell index moves when the
+/// resolution changes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum SourceShape {
     /// A single Yee cell: an oscillating point dipole, which radiates the
     /// familiar toroidal pattern with a null along its own axis.
-    Point { at: [u32; 3] },
-    /// A planar sheet normal to `axis`, centred on the domain and apodized by
-    /// a Gaussian of the given waist in cells.
+    Point { at: [f32; 3] },
+    /// A planar sheet normal to `axis`, at `offset` metres along it, centred
+    /// on the domain transversely and apodized by a Gaussian of the given
+    /// waist in metres.
     ///
     /// A waist comparable to the domain approximates a plane wave; a small one
     /// launches a diverging beam. The sheet is soft, so it radiates in *both*
     /// directions along `axis` — total-field/scattered-field, which would make
     /// it one-way, is not implemented.
-    Sheet {
-        axis: Axis,
-        position: u32,
-        waist: f32,
-    },
+    Sheet { axis: Axis, offset: f32, waist: f32 },
 }
 
 /// A source: a shape, a direction, and a time profile.
@@ -161,8 +162,8 @@ pub struct Source {
 }
 
 impl Source {
-    /// A point dipole at a cell.
-    pub fn point(at: [u32; 3], polarization: Axis, waveform: Waveform) -> Self {
+    /// A point dipole at a position in metres.
+    pub fn point(at: [f32; 3], polarization: Axis, waveform: Waveform) -> Self {
         Self {
             shape: SourceShape::Point { at },
             polarization,
@@ -173,9 +174,11 @@ impl Source {
 
     /// An apodized sheet, which is the shape that launches something looking
     /// like a propagating wave packet rather than a spherical wave.
+    ///
+    /// `offset` and `waist` are metres.
     pub fn sheet(
         axis: Axis,
-        position: u32,
+        offset: f32,
         waist: f32,
         polarization: Axis,
         waveform: Waveform,
@@ -183,7 +186,7 @@ impl Source {
         Self {
             shape: SourceShape::Sheet {
                 axis,
-                position,
+                offset,
                 waist,
             },
             polarization,
@@ -197,6 +200,19 @@ impl Source {
         self
     }
 
+    /// Where this source sits, in metres. A sheet reports the centre of the
+    /// plane it occupies.
+    pub fn position(&self) -> [f32; 3] {
+        match self.shape {
+            SourceShape::Point { at } => at,
+            SourceShape::Sheet { axis, offset, .. } => {
+                let mut position = [0.0; 3];
+                position[axis.index()] = offset;
+                position
+            }
+        }
+    }
+
     /// Resolves the source against a grid at one instant.
     ///
     /// Both solvers consume this: it reduces every shape to a box of cells and
@@ -207,7 +223,7 @@ impl Source {
         let value = self.amplitude * self.waveform.evaluate(time);
         match self.shape {
             SourceShape::Point { at } => Injection {
-                origin: [at[0] as usize, at[1] as usize, at[2] as usize],
+                origin: grid.cell_containing(at),
                 extent: [1, 1, 1],
                 center: [0.0; 3],
                 inverse_waist_squared: 0.0,
@@ -216,24 +232,27 @@ impl Source {
             },
             SourceShape::Sheet {
                 axis,
-                position,
+                offset,
                 waist,
             } => {
                 let a = axis.index();
+                let mut position = [0.0; 3];
+                position[a] = offset;
+
                 let mut origin = [0, 0, 0];
                 let mut region = extent;
-                origin[a] = (position as usize).min(extent[a] - 1);
+                origin[a] = grid.cell_containing(position)[a];
                 region[a] = 1;
-                let center = [
-                    0.5 * extent[0] as f32,
-                    0.5 * extent[1] as f32,
-                    0.5 * extent[2] as f32,
-                ];
+
+                // The apodization is evaluated in cells by both solvers, so the
+                // waist converts here rather than in two kernels.
+                let waist_cells = waist / grid.cell_size;
+                let center = std::array::from_fn(|axis| 0.5 * extent[axis] as f32);
                 Injection {
                     origin,
                     extent: region,
                     center,
-                    inverse_waist_squared: 1.0 / (waist * waist),
+                    inverse_waist_squared: 1.0 / (waist_cells * waist_cells),
                     component: self.polarization.index(),
                     value,
                 }
@@ -372,7 +391,12 @@ mod tests {
 
     #[test]
     fn point_injection_covers_exactly_one_cell() {
-        let source = Source::point([4, 5, 6], Axis::Z, Waveform::ricker(1e9));
+        // 32x40x48 cells at 1 mm: cell (4,5,6) centres at (-11.5, -14.5, -17.5) mm.
+        let source = Source::point(
+            [-11.5e-3, -14.5e-3, -17.5e-3],
+            Axis::Z,
+            Waveform::ricker(1e9),
+        );
         let injection = source.injection(&grid(), 0.0);
         assert_eq!(injection.cell_count(), 1);
         assert_eq!(injection.origin, [4, 5, 6]);
@@ -383,7 +407,8 @@ mod tests {
     #[test]
     fn sheet_injection_spans_the_plane_and_apodizes_transversely() {
         let grid = grid();
-        let source = Source::sheet(Axis::X, 8, 6.0, Axis::Z, Waveform::ricker(1e9));
+        // x = -8 mm is cell 8 of 32; a 6 mm waist is 6 cells.
+        let source = Source::sheet(Axis::X, -8e-3, 6e-3, Axis::Z, Waveform::ricker(1e9));
         let injection = source.injection(&grid, 0.0);
         assert_eq!(injection.origin, [8, 0, 0]);
         assert_eq!(injection.extent, [1, 40, 48]);
@@ -402,7 +427,7 @@ mod tests {
     fn injection_value_follows_the_waveform() {
         let grid = grid();
         let waveform = Waveform::ricker(1e9);
-        let source = Source::point([1, 1, 1], Axis::X, waveform).with_amplitude(3.0);
+        let source = Source::point([0.0; 3], Axis::X, waveform).with_amplitude(3.0);
         let time = 0.7e-9;
         let injection = source.injection(&grid, time);
         assert!((injection.value - 3.0 * waveform.evaluate(time)).abs() < 1e-6);
@@ -411,7 +436,7 @@ mod tests {
     #[test]
     fn sheet_clamps_a_position_past_the_far_wall() {
         let grid = grid();
-        let source = Source::sheet(Axis::Y, 999, 4.0, Axis::X, Waveform::ricker(1e9));
+        let source = Source::sheet(Axis::Y, 9.9, 4e-3, Axis::X, Waveform::ricker(1e9));
         let injection = source.injection(&grid, 0.0);
         assert_eq!(injection.origin[1], 39);
         assert!(matches!(source.shape, SourceShape::Sheet { .. }));

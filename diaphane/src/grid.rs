@@ -155,9 +155,76 @@ impl Grid {
         }
     }
 
+    /// A grid covering `size` metres at `resolution` cells per metre.
+    ///
+    /// This is the constructor scenes are authored against: it is the one where
+    /// changing the resolution leaves the physical problem alone.
+    pub fn for_size(size: [f32; 3], resolution: f32) -> Self {
+        assert!(
+            resolution > 0.0 && resolution.is_finite(),
+            "resolution must be positive and finite, got {resolution}"
+        );
+        let cells = size.map(|metres| (metres * resolution).round().max(2.0) as u32);
+        Self::new(Extent::new(cells[0], cells[1], cells[2]), 1.0 / resolution)
+    }
+
+    /// Cells per metre.
+    pub fn resolution(&self) -> f32 {
+        1.0 / self.cell_size
+    }
+
+    /// Physical size of the domain in metres.
+    pub fn size(&self) -> [f32; 3] {
+        self.extent.as_array().map(|n| n as f32 * self.cell_size)
+    }
+
     /// Time step `Δt = S·Δ/c`, in seconds.
     pub fn time_step(&self) -> f32 {
         self.courant * self.cell_size / SPEED_OF_LIGHT
+    }
+
+    /// Cell coordinate of a physical position.
+    ///
+    /// # The origin is the centre of the domain
+    ///
+    /// Not the corner. Geometry written against a centred origin survives a
+    /// change of resolution *and* a change of domain size without moving,
+    /// which is the whole point of specifying it in metres. Against a corner
+    /// origin, growing the domain to give a wave more room to fly would drag
+    /// every object along with the far wall.
+    pub fn to_cell(&self, position: [f32; 3]) -> [f32; 3] {
+        let extent = self.extent.as_array();
+        std::array::from_fn(|axis| position[axis] / self.cell_size + 0.5 * extent[axis] as f32)
+    }
+
+    /// Physical position of a possibly fractional cell coordinate.
+    pub fn to_position(&self, cell: [f32; 3]) -> [f32; 3] {
+        let extent = self.extent.as_array();
+        std::array::from_fn(|axis| (cell[axis] - 0.5 * extent[axis] as f32) * self.cell_size)
+    }
+
+    /// Index of the cell containing a physical position, clamped to the domain.
+    ///
+    /// The *floor*, not the nearest integer: [`Self::to_cell`] measures from
+    /// cell corners, so cell `i` spans `[i, i+1)` and its centre is at `i+0.5`.
+    /// Rounding instead would put every cell centre in its right-hand
+    /// neighbour, which is a half-cell error that looks like nothing.
+    pub fn cell_containing(&self, position: [f32; 3]) -> [usize; 3] {
+        let cell = self.to_cell(position);
+        let extent = self.extent.as_array();
+        std::array::from_fn(|axis| (cell[axis].floor().max(0.0) as usize).min(extent[axis] - 1))
+    }
+
+    /// Physical position of the centre of a cell, which is where material
+    /// membership is decided.
+    pub fn cell_center(&self, coord: [usize; 3]) -> [f32; 3] {
+        self.to_position(std::array::from_fn(|axis| coord[axis] as f32 + 0.5))
+    }
+
+    /// Whether a physical position lies inside the domain.
+    pub fn contains(&self, position: [f32; 3]) -> bool {
+        let size = self.size();
+        (0..3).all(|axis| position[axis].abs() <= 0.5 * size[axis])
     }
 
     /// Cells per wavelength at `frequency` in a medium of the given refractive
@@ -299,6 +366,67 @@ mod tests {
 
         let fine = numerical_phase_velocity(0.5, 40.0, [1.0, 0.0, 0.0]);
         assert!(1.0 - fine < 1.0 - axial, "refining should reduce the error");
+    }
+
+    #[test]
+    fn physical_coordinates_are_centred_and_round_trip() {
+        let grid = Grid::new(Extent::new(40, 60, 80), 1e-3);
+        let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|axis| (a[axis] - b[axis]).abs() < 1e-7);
+        assert!(close(grid.size(), [0.04, 0.06, 0.08]), "{:?}", grid.size());
+        // The origin sits at the centre, so the domain runs from −L/2 to +L/2.
+        assert_eq!(grid.to_cell([0.0; 3]), [20.0, 30.0, 40.0]);
+        assert_eq!(grid.to_position([20.0, 30.0, 40.0]), [0.0; 3]);
+        assert!(grid.contains([0.019, -0.029, 0.0]));
+        assert!(!grid.contains([0.021, 0.0, 0.0]));
+
+        for position in [[0.0; 3], [0.011, -0.007, 0.03], [-0.02, 0.03, -0.04]] {
+            let round_trip = grid.to_position(grid.to_cell(position));
+            for axis in 0..3 {
+                assert!((round_trip[axis] - position[axis]).abs() < 1e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_does_not_move_when_the_resolution_changes() {
+        // The property the whole change to physical units exists to provide:
+        // the same point in metres lands at the same fraction of the domain
+        // regardless of how finely it is discretized.
+        let size = [0.04, 0.06, 0.08];
+        let coarse = Grid::for_size(size, 1000.0);
+        let fine = Grid::for_size(size, 2000.0);
+        assert_eq!(coarse.extent, Extent::new(40, 60, 80));
+        assert_eq!(fine.extent, Extent::new(80, 120, 160));
+
+        let position = [0.012, -0.018, 0.031];
+        let coarse_cell = coarse.to_cell(position);
+        let fine_cell = fine.to_cell(position);
+        for axis in 0..3 {
+            assert!((fine_cell[axis] - 2.0 * coarse_cell[axis]).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn a_cell_centre_lands_back_in_its_own_cell() {
+        // The half-cell error this guards against: rounding rather than
+        // flooring puts every centre in the next cell along.
+        let grid = Grid::new(Extent::new(12, 14, 16), 1e-3);
+        for coord in [[0, 0, 0], [4, 5, 6], [11, 13, 15], [6, 7, 8]] {
+            assert_eq!(grid.cell_containing(grid.cell_center(coord)), coord);
+        }
+        // Positions outside the domain clamp rather than wrapping or panicking.
+        assert_eq!(grid.cell_containing([-9.9, 0.0, 0.0]), [0, 7, 8]);
+        assert_eq!(grid.cell_containing([9.9, 9.9, 9.9]), [11, 13, 15]);
+    }
+
+    #[test]
+    fn cell_centres_are_half_a_cell_in_from_the_corner() {
+        let grid = Grid::new(Extent::cube(10), 1e-3);
+        for axis in 0..3 {
+            assert!((grid.cell_center([0, 0, 0])[axis] + 0.0045).abs() < 1e-7);
+            assert!((grid.cell_center([9, 9, 9])[axis] - 0.0045).abs() < 1e-7);
+        }
+        assert!((grid.resolution() - 1000.0).abs() < 1e-3);
     }
 
     #[test]

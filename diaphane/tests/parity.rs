@@ -132,27 +132,28 @@ fn a_dielectric_slab_and_a_conductor() {
     // perfect-conductor special case are both on the path.
     let mut scene = Scene::empty(Extent::new(44, 40, 40), 1e-3);
     let frequency = scene.grid.frequency_for_resolution(24.0);
+    // 44 x 40 x 40 cells at 1 mm: the domain runs -22..22 by -20..20 mm.
     let glass = scene.materials.push(Material::refractive(1.5));
     let lossy = scene.materials.push(Material::matched_lossy(2.0, 0.05));
     let metal = scene.materials.push(Material::PERFECT_CONDUCTOR);
     scene.shapes.push(Shape::Slab {
         axis: Axis::X,
-        start: 24,
-        end: 32,
+        offset: 6e-3,
+        thickness: 8e-3,
         material: glass,
     });
     scene.shapes.push(Shape::Sphere {
-        center: [14.0, 20.0, 20.0],
-        radius: 5.0,
+        center: [-8e-3, 0.0, 0.0],
+        radius: 5e-3,
         material: lossy,
     });
     scene.shapes.push(Shape::Block {
-        min: [34, 14, 14],
-        max: [38, 26, 26],
+        center: [14e-3, 0.0, 0.0],
+        size: [4e-3, 12e-3, 12e-3],
         material: metal,
     });
     let scene = scene.with_source(Source::point(
-        [12, 20, 20],
+        [-10e-3, 0.0, 0.0],
         Axis::Z,
         Waveform::ricker(frequency),
     ));
@@ -171,17 +172,17 @@ fn several_sources_at_once() {
     });
     let frequency = scene.grid.frequency_for_resolution(20.0);
     scene.sources.push(Source::point(
-        [20, 20, 20],
+        [0.0; 3],
         Axis::Z,
         Waveform::ricker(frequency),
     ));
-    scene.sources.push(
-        Source::point([20, 20, 20], Axis::X, Waveform::ricker(frequency)).with_amplitude(-0.5),
-    );
+    scene
+        .sources
+        .push(Source::point([0.0; 3], Axis::X, Waveform::ricker(frequency)).with_amplitude(-0.5));
     scene.sources.push(Source::sheet(
         Axis::Y,
-        12,
-        6.0,
+        -8e-3,
+        6e-3,
         Axis::Z,
         Waveform::gaussian_pulse(frequency, 3.0),
     ));
