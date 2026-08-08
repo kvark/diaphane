@@ -152,7 +152,31 @@ a solver you did not compile. Tidy3D is the counterexample that proves the
 point: its scenes are declarative JSON because the solver runs elsewhere and
 the scene has to travel.
 
-The brief's painting and dragging are still untouched.
+The brief's painting and dragging are still untouched, and there is a reason
+beyond effort: they would break the timeline. Everything about scrubbing rests
+on the state depending only on the step number, and mutating geometry while
+the solver runs makes it depend on the history of edits instead. The brief's
+own answer — commit the geometry and reset the fields — generalizes: an edit
+starts a new take with its own `t = 0`, and a timeline scrubs within one take.
+
+## Deviation 6: a time slider, built on determinism
+
+The brief asks for play/pause/step/reset. What is here is a scrub bar, and it
+works because the state is a pure function of `(scene, step)` — so any step can
+be *reproduced* rather than recorded.
+
+[`Timeline`](../diaphane/src/timeline.rs) is a ring of keyframes that bounds
+the replay cost; seeking outside the window falls back to replaying from zero,
+which is slower and always correct. The memory is stated rather than hidden:
+24 bytes per cell per keyframe, 50 MB each at 128³, so the interval trades
+scrub latency against the bill.
+
+[`cpu::Simulation::reverse`](../diaphane/src/cpu.rs) is the other half.
+Leapfrog is an exact involution, so a lossless box runs backwards with no
+memory at all — but it costs one step per step, and through the absorbing
+layer it amplifies by more than 3× per step, so it refuses there. It is the
+right tool for nudging back a frame and the wrong one for a slider. A test
+runs both routes to the same step and requires them to agree.
 
 ## What carried over unchanged
 

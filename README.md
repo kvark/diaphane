@@ -14,6 +14,39 @@ Built on [`blade-graphics`](https://github.com/kvark/blade).
 cargo run --release -p diaphane-viz
 ```
 
+## Scenes
+
+A scene is data, not a program: geometry, materials, sources and boundary in a
+commented [RON](https://github.com/ron-rs/ron) file. Everything is in **metres,
+from the centre of the domain**, so a scene is not welded to the resolution it
+was written at — `Scene::with_resolution` rediscretizes it without moving
+anything, which makes "run it at 2× and check the answer stopped changing" one
+call.
+
+```
+cargo run --release -p diaphane-viz -- --scene scenes/double-slit.ron
+cargo run --release -p diaphane-viz -- --scene cavity --save-scene mine.ron
+```
+
+[`scenes/`](scenes) has five worked examples — free flight, a conducting
+cavity, a glass slab, a metal sphere, and Young's double slit — each commented
+with what it shows and what to look at.
+
+## Time
+
+The state is a pure function of `(scene, step)`. Nothing is random, sources are
+analytic, so any step can be reproduced rather than recorded. That gives two
+independent ways to move backwards:
+
+- **Keyframes.** [`Timeline`](diaphane/src/timeline.rs) snapshots the fields
+  periodically; seeking restores the nearest earlier one and replays. That is
+  what the scrub bar along the bottom of the window drags. 24 bytes per cell
+  per keyframe, so a long run gets a *window* rather than a full history.
+- **Reversal.** Leapfrog is an exact involution, so the solver runs backwards
+  with no memory at all — in a lossless box. Through the absorbing layer it
+  amplifies by 3× per step, so `reverse` refuses rather than returning an
+  exponentially growing field.
+
 ## What is here
 
 | | |
