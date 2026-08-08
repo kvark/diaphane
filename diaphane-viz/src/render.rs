@@ -83,9 +83,11 @@ pub struct ScrubBar {
 }
 
 impl ScrubBar {
-    /// Height of the bar in normalized screen units, and so also the region
-    /// the pointer treats as a scrub rather than an orbit.
-    pub const HEIGHT: f32 = 0.06;
+    /// Height of the bar as a fraction of the image, and so also the region
+    /// the pointer treats as a scrub rather than an orbit. The shader uses the
+    /// same number in the same units, which is the point of it being one
+    /// constant.
+    pub const HEIGHT: f32 = 0.045;
 
     /// The fraction a pointer at horizontal screen position `x` (in pixels)
     /// selects.
