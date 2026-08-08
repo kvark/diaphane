@@ -122,6 +122,10 @@ authoring is through RON files rather than a pointer.
 
 ## Layout
 
+See [`benchmarks.md`](benchmarks.md) for what this costs and buys, measured.
+
+## Layout
+
 ```
 diaphane/          headless solver library. No windowing dependency.
   src/grid.rs        Yee grid, extents, indexing, staggering convention
