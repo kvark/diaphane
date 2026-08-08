@@ -82,11 +82,18 @@ edges and corners with no special cases. Each axis stores two profiles, sampled
 at integer and half-integer positions, because `E` and `H` are staggered and a
 matched layer requires the loss to be co-located with the field it damps.
 
-Measured reflection is asserted in the validation suite. It is not CPML — it
-does not reach the −60 dB the brief asks for at grazing incidence, because an
-isotropic conductivity cannot. It is around −40 dB at normal incidence, which
-is well past "you cannot see the reflection", and it required no auxiliary `ψ`
-fields at all. CPML remains the right eventual answer for quantitative work.
+Reflection is measured, not eyeballed: `the_absorbing_layer_reflects_below_the_stated_level`
+runs the same scene in a domain and in a 3× longer reference domain and takes
+the difference between the two probe traces, which is by construction the part
+that came back off the near wall. A ten-cell layer measures **−58 dB** against
+a point source radiating into it across all angles. The test asserts −50 dB.
+
+That is close to the −60 dB the brief wanted from CPML, for none of the
+machinery — no auxiliary `ψ` fields, no complex coordinate stretching. It will
+not hold up as well as CPML for strongly evanescent or near-grazing content,
+which is what the complex stretch exists to absorb and what a real conductivity
+cannot touch; CPML remains the right answer if this ever needs to be
+quantitative at grazing incidence.
 
 `Boundary::Pec` is also available and is *free*: clamping the stencil to the
 array bounds leaves the outermost tangential `E` samples at zero forever, which

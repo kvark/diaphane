@@ -49,13 +49,21 @@ everywhere else. Every FDTD bug is an off-by-half.
 
 `cargo test --workspace` runs, without needing a GPU:
 
-- **numerical phase velocity** against the analytic discrete dispersion
-  relation, along an axis and along a diagonal — the check is that the solver
-  matches the *discrete* physics, which is not `c` and provably cannot be
-- **energy conservation** in a closed PEC box
+- **an exact discrete plane wave**, seeded and required to propagate exactly —
+  not a discretized continuum solution but a solution of the stepping scheme
+  itself, in vacuum and in dielectrics, along axes, diagonals and oblique
+  directions. Reproducing it means every convention is right at once: which
+  sample sits at which half-cell, which difference is forward, and how far
+  apart in time `E` and `H` are.
+- **numerical phase velocity** against the analytic dispersion relation. The
+  check is that the solver matches the *discrete* physics, which is not `c` and
+  provably cannot be — plus a negative control confirming the test would notice
+  if it were wrong
+- **energy conservation** in a closed PEC box over 40,000 steps
 - **absorbing-layer reflection**, measured in dB against an oversized reference
-  domain rather than eyeballed
-- **plane-wave structure**: transversality and the free-space impedance
+  domain rather than eyeballed. A ten-cell layer comes in at −58 dB.
+- **energy equipartition** in a travelling packet, against the alternation seen
+  in a cavity — the two halves of the statement the visualizer exists to show
 
 and, when a Vulkan/Metal device is available, **CPU/GPU parity** on scenes with
 dielectrics, conductors, absorbers and overlapping sources. On a headless Linux
