@@ -7,7 +7,7 @@
 
 use crate::{
     boundary::Boundary,
-    grid::{Axis, Extent, Grid},
+    grid::{Axis, Extent, Grid, SPEED_OF_LIGHT},
     material::{Material, MaterialTable},
     source::{Source, Waveform},
 };
@@ -136,7 +136,9 @@ impl Scene {
         Self::on_grid(Grid::new(extent, cell_size))
     }
 
-    fn on_grid(grid: Grid) -> Self {
+    /// An empty domain on a grid you built yourself — the way in for a graded
+    /// one, since [`Grid::graded`] is where refinements are stated.
+    pub fn on_grid(grid: Grid) -> Self {
         Self {
             grid,
             boundary: Boundary::DEFAULT,
@@ -209,19 +211,68 @@ impl Scene {
     /// Under-resolving is the most common way to get a result that looks
     /// convincing and is wrong: the wave still propagates, just at the wrong
     /// speed, so nothing announces the problem.
+    /// For each material present, its refractive index paired with the largest
+    /// cell it sits in — the place where that material is least well resolved.
+    ///
+    /// Vacuum is included, because an under-resolved *empty* region is just as
+    /// wrong; it simply needs a bigger cell to get there.
+    fn worst_resolved(&self) -> Vec<(f32, f32)> {
+        let extent = self.grid.extent.as_array();
+        let widths = Axis::ALL.map(|axis| self.grid.spacing(axis).primary());
+        let indices = self.material_indices();
+        let mut coarsest = vec![0.0f32; self.materials.len()];
+        for z in 0..extent[2] {
+            for y in 0..extent[1] {
+                let slab = widths[1][y].max(widths[2][z]);
+                let row = (z * extent[1] + y) * extent[0];
+                for (x, &width) in widths[0].iter().enumerate() {
+                    let cell = slab.max(width);
+                    let material = indices[row + x] as usize;
+                    coarsest[material] = coarsest[material].max(cell);
+                }
+            }
+        }
+        coarsest
+            .iter()
+            .enumerate()
+            .filter(|&(_, &cell)| cell > 0.0)
+            .map(|(material, &cell)| (self.materials.get(material as u32).refractive_index(), cell))
+            .collect()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.grid.validate();
-        for source in self.sources.iter() {
-            let index = self.materials.peak_refractive_index();
-            let cells = self
-                .grid
-                .cells_per_wavelength(source.waveform.dominant_frequency(), index);
-            if cells < 10.0 {
+        // Structural checks first. Everything below rasterizes the shapes and
+        // looks materials up by the index it finds, so a dangling reference has
+        // to be reported here rather than panicking three lines later.
+        for shape in self.shapes.iter() {
+            if shape.material() as usize >= self.materials.len() {
                 return Err(format!(
-                    "{cells:.1} cells per wavelength at {:.3} GHz in index {index:.2}; \
-                     below 10 the phase error is severe",
-                    source.waveform.dominant_frequency() * 1e-9,
+                    "shape references material {} but the table has {}",
+                    shape.material(),
+                    self.materials.len()
                 ));
+            }
+        }
+        // Resolution is checked against the cells each material *actually
+        // occupies*, not against the coarsest cell in the domain. Pairing the
+        // highest index in the scene with the largest cell anywhere is only the
+        // right question on a uniform grid — on a graded one it rejects
+        // precisely the scenes grading exists for, where the slow material is
+        // small and the refinement is over it.
+        let worst = self.worst_resolved();
+        for source in self.sources.iter() {
+            let frequency = source.waveform.dominant_frequency();
+            for &(index, cell_size) in worst.iter() {
+                let cells = SPEED_OF_LIGHT / (index * frequency * cell_size);
+                if cells < 10.0 {
+                    return Err(format!(
+                        "{cells:.1} cells per wavelength at {:.3} GHz in index {index:.2}, \
+                         where the cells are {:.3} mm; below 10 the phase error is severe",
+                        frequency * 1e-9,
+                        cell_size * 1e3,
+                    ));
+                }
             }
         }
         for source in self.sources.iter() {
@@ -235,13 +286,6 @@ impl Scene {
             }
         }
         for shape in self.shapes.iter() {
-            if shape.material() as usize >= self.materials.len() {
-                return Err(format!(
-                    "shape references material {} but the table has {}",
-                    shape.material(),
-                    self.materials.len()
-                ));
-            }
             // A shape entirely outside the domain paints nothing, and after
             // the move to metres the way that happens is passing cell indices
             // by mistake. Silently rendering an empty scene is the worst
@@ -301,7 +345,11 @@ impl Scene {
     /// densities alternate in place, which is the clearest view of the two
     /// fields trading energy back and forth.
     pub fn cavity(extent: Extent) -> Self {
-        let grid = Grid::new(extent, PRESET_CELL_SIZE);
+        Self::cavity_on(Grid::new(extent, PRESET_CELL_SIZE))
+    }
+
+    /// The same cavity on a grid you built yourself, graded or not.
+    pub fn cavity_on(grid: Grid) -> Self {
         let size = grid.size();
         let frequency = grid.frequency_for_resolution(16.0);
         Self {

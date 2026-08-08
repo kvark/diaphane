@@ -233,6 +233,58 @@ turns code Vulkan accepts into an error. CI cross-checks
 `--target aarch64-apple-darwin` from the Linux lint job, which costs twenty
 seconds instead of a macOS runner.
 
+## Deviation 8: cells are boxes, not cubes
+
+The brief assumes one cell size. Each axis here carries its own list of cell
+widths, so resolution can be spent where the physics is small and saved where
+it is not.
+
+This is the cheap end of adaptive refinement, and the choice is deliberate.
+Full block-structured AMR — a hierarchy of patches, subcycled in time — buys
+locality that a tensor product cannot, and costs three things that are not
+obvious until you have them: interpolation at every coarse/fine interface,
+spurious reflection off that interface (typically −30 to −50 dB, *worse* than
+our absorbing walls at −58 dB, and worst exactly for the short-wavelength
+content the refinement existed to capture), and late-time instability, because
+interpolation breaks the adjointness of the spatial operator and pushes
+eigenvalues off the unit circle by an amount too small to see for tens of
+thousands of steps. Making subgridding provably stable is a research topic; the
+energy-conserving local-time-stepping schemes (Diaz & Grote; Grote & Mitkova)
+are the answer, and they are a different solver.
+
+A graded dense grid has none of that. It stays a plain symmetric leapfrog with
+no interfaces at all, so `a_graded_conducting_box_conserves_energy` passes for
+the same reason the uniform one does. What it gives up is locality: refinement
+is per axis and therefore a **tensor product**, so a refined box refines the
+three slabs it projects onto, all the way through the domain. Right for layered
+stacks, films, wires and boundary layers; wasteful for one small ball in a large
+empty box. A `Refinement` can opt an axis out entirely by giving it a
+non-positive size, and doing so is usually the difference between a useful grid
+and a ruinous one.
+
+Two things had to be got right for it to be worth having:
+
+- **Two spacings per axis, and confusing them is the graded off-by-half.** `H`
+  differences `E` between two corners — one whole cell, the *primary* spacing.
+  `E` differences `H` between two centres, spanning two half cells that need not
+  match — the *dual*. On a uniform grid they coincide, which is exactly why a
+  graded grid finds a mistake a uniform one hides.
+- **Uniform is not a special case.** It is a `Spacing` whose widths happen to be
+  equal, so there is one code path and the graded one cannot rot. That only
+  works if uniform grids come out bit-identical, which needed corner positions
+  in `f64` (a running `f32` sum over a few hundred widths drifted enough to land
+  a source one cell over) and uniform corners built by multiplication rather
+  than accumulation, so the domain centre still falls exactly on a corner.
+
+Grading is capped at 1.15× between neighbours by default, because the Yee
+scheme's second-order accuracy rests on a centred difference actually being
+centred, and a change of spacing breaks that locally. The cap is a contract:
+`Spacing::worst_ratio` is asserted, not observed.
+
+It costs about 16% of the CPU reference's throughput and nothing measurable on
+the GPU. [`tests/graded.rs`](../tests/graded.rs) is where the claims above are
+numbers rather than assertions.
+
 ## What carried over unchanged
 
 - Impedance-normalized fields `Ẽ = √(ε₀/μ₀)·E`, so the two curl updates have
@@ -271,7 +323,7 @@ src/shaders/fdtd.wgsl
 examples/common/   camera, command line, and the volume render pass
 examples/viz/      the viewer: a window, an orbit camera, a scrub bar
 examples/render/   the same view, written to PNGs. No display needed
-tests/             analytic validation, CPU/GPU parity, the scene format
+tests/             analytic validation, CPU/GPU parity, graded grids, scenes
 benches/           throughput, and comparison against the ecosystem
 scenes/            curated example scenes
 ```

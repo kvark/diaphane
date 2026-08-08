@@ -6,7 +6,7 @@
 
 use crate::common::camera::Camera;
 use blade_graphics as gpu;
-use diaphane::{Extent, gpu::Simulation};
+use diaphane::gpu::Simulation;
 use std::{fs, io, mem, path::Path, sync::Arc};
 
 /// Which quantity the volume shows.
@@ -129,6 +129,8 @@ impl Default for ViewSettings {
 struct ViewParams {
     /// `nx, ny, nz, cell_count`.
     extent: [u32; 4],
+    /// Domain size in coarse cells, then the lookup sample count per axis.
+    box_size: [f32; 4],
     /// Camera position in cells, then the ray-march step in cells.
     origin: [f32; 4],
     /// Camera right scaled by aspect and field of view, then exposure.
@@ -147,6 +149,7 @@ struct VolumeData {
     electric: gpu::BufferPiece,
     magnetic: gpu::BufferPiece,
     peak: gpu::BufferPiece,
+    lookup: gpu::BufferPiece,
     view: ViewParams,
 }
 
@@ -228,13 +231,15 @@ impl Renderer {
 
     fn params(
         &self,
-        extent: Extent,
+        simulation: &Simulation,
         settings: &ViewSettings,
         target: gpu::Extent,
         march: f32,
     ) -> ViewParams {
+        let extent = simulation.grid().extent;
+        let box_size = simulation.grid().box_size();
         let aspect = target.width as f32 / target.height.max(1) as f32;
-        let basis = settings.camera.basis(extent, aspect);
+        let basis = settings.camera.basis(box_size, aspect);
         // The reduction measures energy density; the signed views show a field
         // amplitude, whose scale is the square root of it.
         let reference = self.scale.max(f32::MIN_POSITIVE);
@@ -245,6 +250,12 @@ impl Renderer {
         };
         ViewParams {
             extent: [extent.x, extent.y, extent.z, extent.total() as u32],
+            box_size: [
+                box_size[0],
+                box_size[1],
+                box_size[2],
+                simulation.lookup_samples() as f32,
+            ],
             origin: [
                 basis.position[0],
                 basis.position[1],
@@ -261,12 +272,12 @@ impl Renderer {
             ],
             tone: match settings.scrub {
                 Some(scrub) => [
-                    1.0 / reference_path(extent),
+                    1.0 / reference_path(box_size),
                     scrub.played,
                     scrub.window_start,
                     ScrubBar::HEIGHT,
                 ],
-                None => [1.0 / reference_path(extent), 0.0, 0.0, 0.0],
+                None => [1.0 / reference_path(box_size), 0.0, 0.0, 0.0],
             },
         }
     }
@@ -283,6 +294,7 @@ impl Renderer {
             electric: simulation.electric_buffer(),
             magnetic: simulation.magnetic_buffer(),
             peak: self.peak.into(),
+            lookup: simulation.lookup_buffer(),
             view: ViewParams {
                 extent: [extent.x, extent.y, extent.z, extent.total() as u32],
                 ..Default::default()
@@ -314,7 +326,6 @@ impl Renderer {
         self.update_scale();
         self.measure(encoder, simulation);
 
-        let extent = simulation.grid().extent;
         // One sample per cell along the ray is enough at the resolutions the
         // solver is usable at; the field varies over tens of cells.
         let march = 1.0;
@@ -322,7 +333,8 @@ impl Renderer {
             electric: simulation.electric_buffer(),
             magnetic: simulation.magnetic_buffer(),
             peak: self.peak.into(),
-            view: self.params(extent, settings, size, march),
+            lookup: simulation.lookup_buffer(),
+            view: self.params(simulation, settings, size, march),
         };
 
         {
@@ -362,8 +374,8 @@ impl Renderer {
 /// third of the domain means a packet occupying a third of the box reads as
 /// saturated and anything smaller reads as proportionally dimmer, which is
 /// what makes a wave packet look like an object rather than a fog.
-fn reference_path(extent: Extent) -> f32 {
-    let longest = extent.x.max(extent.y).max(extent.z) as f32;
+fn reference_path(box_size: [f32; 3]) -> f32 {
+    let longest = box_size[0].max(box_size[1]).max(box_size[2]);
     (longest / 3.0).max(1.0)
 }
 

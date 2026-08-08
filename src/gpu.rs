@@ -82,6 +82,8 @@ struct Buffers {
     coefficients: gpu::Buffer,
     absorber: gpu::Buffer,
     geometry: gpu::Buffer,
+    /// World-to-cell lookup, for a renderer marching a graded grid.
+    lookup: gpu::Buffer,
     /// Host-visible destination for [`Simulation::read_electric`] and friends.
     readback: gpu::Buffer,
 }
@@ -97,6 +99,7 @@ pub struct Simulation {
     sources: Vec<Source>,
     params: Params,
     field_bytes: u64,
+    lookup_samples: u32,
     step: u64,
 }
 
@@ -139,6 +142,10 @@ impl Simulation {
         let coefficients = scene.materials.coefficients(&scene.grid);
         let absorption = AbsorbingProfile::new(&scene.grid, scene.boundary).packed();
         let geometry = scene.grid.packed_geometry();
+        // Four samples per coarse cell, which puts a lookup interval well
+        // inside one cell everywhere.
+        let lookup_samples = (4 * extent.x.max(extent.y).max(extent.z)).clamp(256, 8192);
+        let lookup = scene.grid.cell_lookup(lookup_samples);
 
         let device_buffer = |name: &str, size: u64| {
             context.create_buffer(gpu::BufferDesc {
@@ -154,6 +161,7 @@ impl Simulation {
             coefficients: device_buffer("material coefficients", byte_size(&coefficients)),
             absorber: device_buffer("absorber profile", byte_size(&absorption)),
             geometry: device_buffer("axis geometry", byte_size(&geometry)),
+            lookup: device_buffer("world to cell", byte_size(&lookup)),
             readback: context.create_buffer(gpu::BufferDesc {
                 name: "readback",
                 size: field_bytes,
@@ -174,6 +182,7 @@ impl Simulation {
         let coefficients_at = append(&mut staging_data, &coefficients);
         let absorber_at = append(&mut staging_data, &absorption);
         let geometry_at = append(&mut staging_data, &geometry);
+        let lookup_at = append(&mut staging_data, &lookup);
         let staging = context.create_buffer(gpu::BufferDesc {
             name: "scene upload",
             size: staging_data.len() as u64,
@@ -211,6 +220,11 @@ impl Simulation {
                 buffers.geometry.into(),
                 byte_size(&geometry),
             );
+            pass.copy_buffer_to_buffer(
+                staging.at(lookup_at),
+                buffers.lookup.into(),
+                byte_size(&lookup),
+            );
         }
         let sync_point = context.submit(&mut encoder);
         context
@@ -231,8 +245,20 @@ impl Simulation {
             grid: scene.grid.clone(),
             sources: scene.sources.clone(),
             field_bytes,
+            lookup_samples,
             step: 0,
         }
+    }
+
+    /// World-to-cell lookup for the renderer, and how many samples per axis
+    /// it holds. Exposed the same way the field buffers are: the renderer
+    /// binds the simulation's own allocations rather than copying them.
+    pub fn lookup_buffer(&self) -> gpu::BufferPiece {
+        self.buffers.lookup.into()
+    }
+
+    pub fn lookup_samples(&self) -> u32 {
+        self.lookup_samples
     }
 
     pub fn grid(&self) -> &Grid {
@@ -535,6 +561,7 @@ impl Drop for Simulation {
         self.context.destroy_buffer(self.buffers.coefficients);
         self.context.destroy_buffer(self.buffers.absorber);
         self.context.destroy_buffer(self.buffers.geometry);
+        self.context.destroy_buffer(self.buffers.lookup);
         self.context.destroy_buffer(self.buffers.readback);
         self.context
             .destroy_compute_pipeline(&mut self.pipelines.magnetic);

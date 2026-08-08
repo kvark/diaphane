@@ -1,0 +1,108 @@
+// A thin high-index film, resolved.
+//
+// The film is 0.4 mm of n = 3.5 silicon: a twenty-first of a wavelength thick,
+// and *half a cell* of the coarse grid. On a uniform grid it does not survive
+// rasterization — depending on where the cell centres happen to fall it rounds
+// away to nothing or to twice its thickness, and either way the answer looks
+// perfectly plausible.
+//
+// Resolving it uniformly means 0.1 mm cells everywhere, and since the time step
+// is set by the finest cell either way, the whole domain pays for a feature
+// occupying half a percent of it.
+//
+// So the grid is graded: 0.1 mm across the film, relaxing back to 0.8 mm out at
+// the walls at no more than 15% growth per cell. Only along x -- see the
+// refinement below, and note what happens to the cell count if you fill in its
+// other two sizes.
+//
+// Watch: the packet arriving from the left, and a reflection racing back out
+// off a film far thinner than the wave that sees it. The change of cell size is
+// measured to reflect below -40 dB, so what comes back is the film and not the
+// mesh.
+//
+// Try:
+//   cargo viz --scene scenes/graded-slab.ron --warmup 240 --mode electric
+//   cargo viz --scene scenes/graded-slab.ron --resolution 1500   // and again, refined
+
+Scene(
+    grid: Grid(
+        // 96 coarse cells of 0.8 mm on a side: a 76.8 mm box, 2.6 free-space
+        // wavelengths across and wide enough that the absorbing layer still
+        // fits when the scene is rediscretized coarser.
+        extent: Extent(x: 96, y: 96, z: 96),
+        cell_size: 0.0008,
+        courant: 0.5,
+        refinements: [
+            // The film and a few wavelengths either side of it. Stated in
+            // metres from the centre, like all geometry, so this survives
+            // `--resolution` without moving.
+            // Only x is refined: `size` is zero on y and z, which opts those
+            // axes out. The film varies across x and is uniform in y and z,
+            // and refining a "box" would put 512 cells on each transverse axis
+            // for a field that is not doing anything there -- throwing away
+            // exactly the saving grading exists to deliver.
+            Refinement(
+                center: (0.0, 0.0, 0.0),
+                size: (0.008, 0.0, 0.0),
+                cell_size: 0.0001,
+            ),
+        ],
+        // Cells may grow by at most 15% from one to the next. Grading harder
+        // than this costs the scheme its second-order accuracy, because a
+        // centred difference is only centred where the spacing is not moving.
+        max_ratio: 1.15,
+    ),
+    boundary: Absorbing(
+        thickness: 10,
+        target_reflection: 0.001,
+    ),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // Silicon at optical frequencies: n = 3.5, so er = 12.25.
+        Material(
+            relative_permittivity: 12.25,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        // 0.4 mm of film: four fine cells across it, and half a coarse one.
+        Slab(
+            axis: X,
+            offset: 0.0,
+            thickness: 0.0004,
+            material: 1,
+        ),
+    ],
+    sources: [
+        // A sheet launching a plane wave from the left, tapered so its edges
+        // do not radiate. The waist is in metres, so the taper is the same
+        // shape whatever the cells under it are doing.
+        Source(
+            shape: Sheet(
+                axis: X,
+                offset: -0.024,
+                waist: 0.012,
+            ),
+            polarization: Z,
+            // 10 GHz: 30 mm in free space, 8.6 mm inside the silicon. The
+            // coarse grid resolves both -- 37 and 10.7 cells per wavelength --
+            // so the refinement is not buying wavelength resolution. It is
+            // buying *geometry*: the film is 1/21 of a wavelength thick, half a
+            // coarse cell, and on a uniform grid it would round away to nothing
+            // or to twice its thickness depending on where it happened to fall.
+            waveform: GaussianPulse(
+                center_frequency: 10000000000.0,
+                duration_cycles: 2.0,
+                delay: 0.0000000004,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

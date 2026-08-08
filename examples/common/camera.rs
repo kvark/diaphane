@@ -1,6 +1,5 @@
-//! An orbit camera, in cell units.
+//! An orbit camera, in coarse-cell units.
 
-use diaphane::Extent;
 use std::f32;
 
 /// Orbits the centre of the domain.
@@ -38,8 +37,12 @@ impl Camera {
     /// Position and the three basis vectors the ray-march wants, already
     /// scaled by the field of view and aspect ratio so the shader only has to
     /// add them up.
-    pub fn basis(&self, extent: Extent, aspect: f32) -> CameraBasis {
-        let size = [extent.x as f32, extent.y as f32, extent.z as f32];
+    ///
+    /// `size` is the domain in coarse cells -- [`Grid::box_size`] -- not the
+    /// cell counts. The two agree on a uniform grid and diverge on a graded
+    /// one, where cell indices stretch wherever the mesh is fine and a camera
+    /// framed on them would frame a shape the domain does not have.
+    pub fn basis(&self, size: [f32; 3], aspect: f32) -> CameraBasis {
         let center = size.map(|v| 0.5 * v);
         let radius = size[0].max(size[1]).max(size[2]);
 
@@ -92,12 +95,10 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::Camera;
-    use diaphane::Extent;
 
     #[test]
     fn looks_at_the_centre_of_the_domain() {
-        let extent = Extent::new(40, 60, 80);
-        let basis = Camera::new().basis(extent, 1.0);
+        let basis = Camera::new().basis([40.0, 60.0, 80.0], 1.0);
         // Walking forward from the camera by the orbit distance must land on
         // the domain centre.
         let radius = 80.0 * 1.9;
@@ -118,7 +119,7 @@ mod tests {
         let mut camera = Camera::new();
         for _ in 0..40 {
             camera.orbit(0.3, 0.2);
-            let basis = camera.basis(Extent::cube(32), 1.6);
+            let basis = camera.basis([32.0; 3], 1.6);
             let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
             assert!(dot(basis.right, basis.forward).abs() < 1e-4);
             assert!(dot(basis.up, basis.forward).abs() < 1e-4);

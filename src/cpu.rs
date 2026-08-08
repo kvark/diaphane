@@ -30,8 +30,12 @@ use crate::{
 
 /// Field energy, split into its two halves.
 ///
-/// In normalized units the densities are `½·εr·Ẽ²` and `½·μr·H²`; multiplying
-/// the total by `μ₀·Δ³` recovers joules. The split is the interesting part:
+/// In normalized units the densities are `½·εr·Ẽ²` and `½·μr·H²`, integrated
+/// over the cell volumes, so multiplying the total by `μ₀` recovers joules.
+/// *Integrated*, not counted per cell: cells need not be the same size, and an
+/// unweighted sum over-counts wherever the mesh is fine. On a graded grid that
+/// does not merely rescale the answer — it reads as energy drift, which is the
+/// one thing this number exists to rule out. The split is the interesting part:
 /// in a propagating wave the two halves track each other, and in a standing
 /// wave they alternate, which is the same statement as "the fields are trading
 /// energy back and forth".
@@ -498,19 +502,33 @@ impl Simulation {
     /// over 10⁵ steps, and an `f32` accumulator over a million cells would
     /// lose more precision than the drift being measured.
     pub fn energy(&self) -> Energy {
+        let extent = self.grid.extent.as_array();
+        let widths = Axis::ALL.map(|axis| self.grid.spacing(axis).primary());
         let mut energy = Energy::default();
-        for (index, &material) in self.material_index.iter().enumerate() {
-            let material = self.materials.get(material);
-            let mut electric = 0.0f32;
-            let mut magnetic = 0.0f32;
-            for axis in 0..3 {
-                let e = self.electric[axis][index];
-                let h = self.magnetic[axis][index];
-                electric += e * e;
-                magnetic += h * h;
+        for z in 0..extent[2] {
+            for y in 0..extent[1] {
+                // The cell volume factorizes across the axes, so two thirds of
+                // it is fixed for the row.
+                let slab = f64::from(widths[1][y]) * f64::from(widths[2][z]);
+                let row = (z * extent[1] + y) * extent[0];
+                for (x, &width) in widths[0].iter().enumerate() {
+                    let index = row + x;
+                    let volume = slab * f64::from(width);
+                    let material = self.materials.get(self.material_index[index]);
+                    let mut electric = 0.0f32;
+                    let mut magnetic = 0.0f32;
+                    for axis in 0..3 {
+                        let e = self.electric[axis][index];
+                        let h = self.magnetic[axis][index];
+                        electric += e * e;
+                        magnetic += h * h;
+                    }
+                    energy.electric +=
+                        0.5 * volume * f64::from(material.relative_permittivity * electric);
+                    energy.magnetic +=
+                        0.5 * volume * f64::from(material.relative_permeability * magnetic);
+                }
             }
-            energy.electric += 0.5 * f64::from(material.relative_permittivity * electric);
-            energy.magnetic += 0.5 * f64::from(material.relative_permeability * magnetic);
         }
         energy
     }
@@ -837,10 +855,25 @@ mod tests {
     fn energy_density_sums_to_the_total_energy() {
         let mut simulation = Simulation::new(&pulse_scene(Extent::cube(24)));
         simulation.advance_by(60);
+        // `energy_density` is a density and `energy` is its integral, so the
+        // sum has to carry the cell volume. On a uniform grid that is one
+        // factor; the point of writing it this way is that it stays true on a
+        // graded one, where the cells the density is sampled on are not all
+        // the same size.
+        let grid = simulation.grid();
+        let extent = grid.extent.as_array();
+        let widths = Axis::ALL.map(|axis| grid.spacing(axis).primary());
         let summed: f64 = simulation
             .energy_density()
             .iter()
-            .map(|&v| f64::from(v))
+            .enumerate()
+            .map(|(index, &density)| {
+                let x = index % extent[0];
+                let y = (index / extent[0]) % extent[1];
+                let z = index / (extent[0] * extent[1]);
+                let volume = f64::from(widths[0][x] * widths[1][y] * widths[2][z]);
+                volume * f64::from(density)
+            })
             .sum();
         let total = simulation.energy().total();
         assert!((summed - total).abs() < total * 1e-4, "{summed} vs {total}");
