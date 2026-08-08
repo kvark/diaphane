@@ -110,7 +110,13 @@ fn assert_parity(scene: &Scene, steps: u64, tolerance: f32) {
 #[test]
 fn free_space_with_an_absorbing_boundary() {
     // Exercises the absorber profiles, the sheet source and its apodization.
-    assert_parity(&Scene::photon(Extent::new(48, 40, 36)), 300, 1e-4);
+    //
+    // The domain is long enough that the packet is still inside it, and driving
+    // into the far absorber, when the comparison happens. Running until the
+    // field has been absorbed instead would compare two decayed remnants and
+    // divide f32 roundoff by whatever was left, which reports a large relative
+    // error for an absolute difference of 1e-7.
+    assert_parity(&Scene::photon(Extent::new(96, 40, 36)), 150, 1e-4);
 }
 
 #[test]

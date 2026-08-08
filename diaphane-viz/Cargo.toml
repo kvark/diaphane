@@ -1,0 +1,22 @@
+[package]
+name = "diaphane-viz"
+description = "Volumetric visualizer for the diaphane electrodynamics solver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+blade-graphics.workspace = true
+blade-macros.workspace = true
+bytemuck.workspace = true
+diaphane = { workspace = true, features = ["serde"] }
+log.workspace = true
+png = "0.18"
+winit = "0.30"
+
+[lints]
+workspace = true

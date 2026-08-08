@@ -43,6 +43,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --workspace --all-features --release
+      - name: Render a frame offscreen
+        # Exercises the whole render path -- pipelines, the auto-range
+        # reduction, and the readback -- on a runner with no display.
+        run: |
+          cargo run --release -p diaphane-viz -- \
+            --frames 1 --extent 64 --warmup 110 --steps 10 \
+            --size 480x360 --mode electric --output-dir frames
 
   build:
     name: Build ${{ matrix.os }}
