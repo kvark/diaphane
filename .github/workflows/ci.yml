@@ -43,24 +43,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Lavapipe gives us a real Vulkan device on a headless runner, so the
-      # GPU solver and the offscreen renderer are exercised for real in CI
-      # rather than merely compiled.
+      # Lavapipe gives us a real Vulkan device on a headless runner and Xvfb
+      # gives us a real X11 display, so the GPU solver, the offscreen renderer
+      # *and* the windowed viewer are all exercised for real here rather than
+      # merely compiled.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            mesa-vulkan-drivers libvulkan1 libxkbcommon-dev
+            mesa-vulkan-drivers libvulkan1 \
+            xvfb libxkbcommon-dev libxkbcommon-x11-0 libx11-xcb1 libxcb-xkb1
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --workspace --all-features --release
+
       - name: Render a frame offscreen
-        # Exercises the whole render path -- pipelines, the auto-range
-        # reduction, and the readback -- on a runner with no display.
+        # The whole render path: pipelines, the auto-range reduction, the
+        # scrub bar, and the readback -- with no display involved at all.
         run: |
-          cargo run --release -p diaphane-viz -- \
+          cargo run --release -p diaphane-viz --bin diaphane-render -- \
             --frames 1 --extent 64 --warmup 110 --steps 10 \
             --size 480x360 --mode electric --timeline --output-dir frames
+
+      - name: Smoke-test the windowed viewer under Xvfb
+        # The event loop, surface creation, swapchain acquire and present --
+        # everything the offscreen path deliberately does not touch. Without
+        # this the viewer is the one component that only ever runs on a
+        # developer's machine.
+        run: |
+          xvfb-run -a --server-args="-screen 0 800x600x24" \
+            cargo run --release -p diaphane-viz --bin diaphane-viz -- \
+              --extent 48 --steps 4 --exit-after 20 --size 480x360
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-frame
+          path: frames/
 
   build:
     name: Build ${{ matrix.os }}
