@@ -68,6 +68,36 @@ pub struct ViewSettings {
     pub gain: f32,
     /// Strength of the signed-log compression; 0 is linear.
     pub log_strength: f32,
+    /// The scrub bar, or `None` to hide it.
+    pub scrub: Option<ScrubBar>,
+}
+
+/// What the scrub bar should show, as fractions of the run so far.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrubBar {
+    /// Where the playhead sits, 0 to 1.
+    pub played: f32,
+    /// Where the keyframed window begins — the earliest step that can be
+    /// reached without replaying from zero.
+    pub window_start: f32,
+}
+
+impl ScrubBar {
+    /// Height of the bar in normalized screen units, and so also the region
+    /// the pointer treats as a scrub rather than an orbit.
+    pub const HEIGHT: f32 = 0.06;
+
+    /// The fraction a pointer at horizontal screen position `x` (in pixels)
+    /// selects.
+    pub fn fraction_at(x: f64, width: u32) -> f32 {
+        (x as f32 / width.max(1) as f32).clamp(0.0, 1.0)
+    }
+
+    /// Whether a pointer at `y` pixels from the top is over the bar.
+    pub fn contains(y: f64, height: u32) -> bool {
+        let from_bottom = 1.0 - (y as f32 / height.max(1) as f32);
+        (0.0..Self::HEIGHT).contains(&from_bottom)
+    }
 }
 
 impl ViewSettings {
@@ -81,6 +111,7 @@ impl ViewSettings {
             // scaling hides completely. Much more than this and the noise
             // floor comes up with it.
             log_strength: 6.0,
+            scrub: None,
         }
     }
 }
@@ -104,7 +135,8 @@ struct ViewParams {
     up: [f32; 4],
     /// Camera forward, then the view mode.
     forward: [f32; 4],
-    /// Reciprocal of the reference path length, then padding.
+    /// Reciprocal of the reference path length, then the scrub bar: played
+    /// fraction, window start fraction, and bar height (0 hides it).
     tone: [f32; 4],
 }
 
@@ -225,7 +257,15 @@ impl Renderer {
                 basis.forward[2],
                 settings.mode.code(),
             ],
-            tone: [1.0 / reference_path(extent), 0.0, 0.0, 0.0],
+            tone: match settings.scrub {
+                Some(scrub) => [
+                    1.0 / reference_path(extent),
+                    scrub.played,
+                    scrub.window_start,
+                    ScrubBar::HEIGHT,
+                ],
+                None => [1.0 / reference_path(extent), 0.0, 0.0, 0.0],
+            },
         }
     }
 

@@ -23,7 +23,9 @@ struct ViewParams {
     up: vec4<f32>,
     // camera forward, then the view mode
     forward: vec4<f32>,
-    // reciprocal of the reference path length, then padding
+    // reciprocal of the reference path length, then the scrub bar:
+    // played fraction, keyframed-window start fraction, bar height in
+    // normalized screen units (0 hides it)
     tone: vec4<f32>,
 }
 
@@ -204,7 +206,8 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
     if signed_view {
         let scaled = signed_log(extreme, log_strength);
         let opacity = min(abs(scaled), 1.0);
-        return vec4<f32>(diverging(scaled) * opacity + sky * (1.0 - opacity) + rim, 1.0);
+        let field = diverging(scaled) * opacity + sky * (1.0 - opacity) + rim;
+        return vec4<f32>(overlay(field, input.screen), 1.0);
     }
 
     // Divide by a reference length, or every ray through the domain saturates
@@ -213,7 +216,13 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
     // Fold the unbounded sum back into [0, 1) rather than clipping, so a bright
     // core keeps its shape instead of flattening.
     let opacity = vec3<f32>(1.0) - exp(-glow);
-    return vec4<f32>(opacity + sky * exp(-glow) + rim, 1.0);
+    let field = opacity + sky * exp(-glow) + rim;
+    return vec4<f32>(overlay(field, input.screen), 1.0);
+}
+
+fn overlay(field: vec3<f32>, screen: vec2<f32>) -> vec3<f32> {
+    let bar = scrub_bar(screen);
+    return mix(field, bar.rgb, bar.a);
 }
 
 /// Emitted colour per unit length at a cell, for the additive views.
@@ -236,6 +245,50 @@ fn component_at(coord: vec3<u32>, mode: u32) -> f32 {
         return pair.y;
     }
     return pair.x;
+}
+
+/// A scrub bar along the bottom edge.
+///
+/// Drawn here rather than composited afterwards because the renderer has no
+/// other surface to draw on -- there is no UI layer -- and a slider you can see
+/// the extent of is what makes "how far back can I drag" answerable without
+/// documentation. Returns a colour to blend over the frame, and zero alpha
+/// everywhere else.
+fn scrub_bar(screen: vec2<f32>) -> vec4<f32> {
+    let height = view.tone.w;
+    if height <= 0.0 {
+        return vec4<f32>(0.0);
+    }
+    // `screen` is -1 at the bottom edge; the bar hugs it.
+    let from_bottom = screen.y + 1.0;
+    if from_bottom > height {
+        return vec4<f32>(0.0);
+    }
+
+    let played = view.tone.y;
+    let window_start = view.tone.z;
+    let position = 0.5 * (screen.x + 1.0);
+
+    let track = vec3<f32>(0.12, 0.13, 0.16);
+    // The span that can be scrubbed instantly, because keyframes cover it.
+    let windowed = vec3<f32>(0.22, 0.30, 0.40);
+    let elapsed = vec3<f32>(0.35, 0.62, 0.95);
+    let head = vec3<f32>(1.0, 0.85, 0.45);
+
+    var colour = track;
+    if position >= window_start {
+        colour = windowed;
+    }
+    if position <= played {
+        colour = elapsed;
+    }
+    // A bright playhead, two pixels wide at any sensible resolution.
+    if abs(position - played) < 0.0025 {
+        colour = head;
+    }
+    // Fade the top edge so the bar does not read as a hard crop of the scene.
+    let softness = smoothstep(height, height * 0.6, from_bottom);
+    return vec4<f32>(colour, 0.55 + 0.45 * softness);
 }
 
 fn background(screen: vec2<f32>) -> vec3<f32> {

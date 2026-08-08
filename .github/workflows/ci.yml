@@ -49,7 +49,7 @@ jobs:
         run: |
           cargo run --release -p diaphane-viz -- \
             --frames 1 --extent 64 --warmup 110 --steps 10 \
-            --size 480x360 --mode electric --output-dir frames
+            --size 480x360 --mode electric --timeline --output-dir frames
 
   build:
     name: Build ${{ matrix.os }}
