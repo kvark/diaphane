@@ -159,7 +159,10 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
     let span = intersect_box(origin, direction, size);
     let enter = max(span.x, 0.0);
     if span.y <= enter {
-        return vec4<f32>(sky, 1.0);
+        // Still composite the bar: most of the bottom edge is rays that miss
+        // the volume entirely, so returning early here drew the bar only
+        // across the width of the box.
+        return vec4<f32>(overlay(sky, input.screen), 1.0);
     }
 
     let march = max(view.origin.w, 0.25);
@@ -259,8 +262,11 @@ fn scrub_bar(screen: vec2<f32>) -> vec4<f32> {
     if height <= 0.0 {
         return vec4<f32>(0.0);
     }
-    // `screen` is -1 at the bottom edge; the bar hugs it.
-    let from_bottom = screen.y + 1.0;
+    // Both this and the host's hit test measure from the bottom edge as a
+    // fraction of the *image*, so `screen.y` (which spans -1 to 1) is halved.
+    // Leaving it unhalved makes the region the pointer scrubs in twice the
+    // region that is drawn, which reads as the bar responding above itself.
+    let from_bottom = 0.5 * (screen.y + 1.0);
     if from_bottom > height {
         return vec4<f32>(0.0);
     }
