@@ -8,34 +8,40 @@ license = "MIT"
 repository = "https://github.com/kvark/diaphane"
 keywords = ["electromagnetics", "fdtd", "simulation", "gpu"]
 categories = ["science", "simulation", "graphics"]
-# `cargo run --features viz` means the window.
-default-run = "diaphane-viz"
 
 [features]
 default = []
+# Scene files. Optional because the solver does not need to read one to run,
+# but this is library API -- `Scene` is the interchange format -- so it is a
+# feature rather than something only the examples can reach.
 serde = ["dep:ron", "dep:serde"]
-# The visualizer. Not on by default, so depending on the solver never drags in
-# a window system: the library half has to stay runnable headless, in CI and
-# embedded elsewhere.
-viz = ["serde", "dep:png", "dep:winit"]
 
+# Everything a consumer of the solver links. There is deliberately no window
+# system here, under any feature: the visualizer is an example, so `winit` and
+# `png` are dev-dependencies and cannot reach a dependency graph that includes
+# this crate. CI asserts that with `--all-features`, which is also what docs.rs
+# builds with.
 [dependencies]
 blade-graphics = "0.8"
 blade-macros = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
-png = { version = "0.18", optional = true }
 ron = { version = "0.12", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-winit = { version = "0.30", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+# Depending on ourselves turns `serde` on for the examples, tests and benches
+# without turning it on for anyone else: a bare `cargo build` still resolves to
+# the four dependencies above, while `cargo test` covers the scene format.
+diaphane = { path = ".", features = ["serde"] }
 # The only 3D FDTD solver published on crates.io, and so the ecosystem baseline
 # the `ecosystem` benchmark measures against.
 # Its default feature set is the only one that builds: the prelude reaches for
 # modules that a narrower selection configures out.
 oxiphoton = "0.1"
+png = "0.18"
+winit = "0.30"
 
 # Mirrors the lint configuration of `blade-graphics`, which this project
 # follows for coding conventions. The comments are theirs.
@@ -63,14 +69,18 @@ pattern_type_mismatch = "warn"
 
 # The viewer needs a display; the renderer writes PNGs and does not. They share
 # the render pass and nothing else, so they are two targets rather than one
-# binary with a mode switch.
-[[bin]]
-name = "diaphane-viz"
-required-features = ["viz"]
+# program with a mode switch. Spelled out rather than left to discovery only
+# for `test`, which is off by default for examples -- the shared command-line
+# parsing has unit tests, and they should run.
+[[example]]
+name = "viz"
+path = "examples/viz/main.rs"
+test = true
 
-[[bin]]
-name = "diaphane-render"
-required-features = ["viz"]
+[[example]]
+name = "render"
+path = "examples/render/main.rs"
+test = true
 
 [[bench]]
 name = "throughput"

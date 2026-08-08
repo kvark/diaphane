@@ -1,16 +1,14 @@
-//! Command-line parsing shared by the two binaries.
+//! Command-line parsing shared by the two programs.
 //!
-//! `diaphane-viz` opens a window; `diaphane-render` writes PNGs and needs no
-//! display at all. They share everything about *what* to simulate and how to
-//! colour it, and share nothing about where the pixels go — so the common part
-//! lives here and each binary owns its own flags and its own help text. A
-//! single binary with an `--offscreen` switch would mean every flag has to
-//! document which mode it applies in.
+//! `cargo viz` opens a window; `cargo render` writes PNGs and needs no display
+//! at all. They share everything about *what* to simulate and how to colour it,
+//! and share nothing about where the pixels go — so the common part lives here
+//! and each program owns its own flags and its own help text. A single program
+//! with an `--offscreen` switch would mean every flag has to document which
+//! mode it applies in.
 
-use crate::{
-    Extent, Scene,
-    viz::render::{ViewMode, ViewSettings},
-};
+use crate::common::render::{ViewMode, ViewSettings};
+use diaphane::{Extent, Scene};
 use std::{env, path::PathBuf, str::FromStr};
 
 /// Millisecond timeout on every GPU wait. Generous, because a batch of a few
@@ -116,8 +114,12 @@ pub struct Common {
 }
 
 /// The shared part of both help texts, so the two cannot drift apart.
+///
+/// `\x20` rather than a plain space because a `\` line continuation eats the
+/// leading whitespace of the next line as well as the newline, which silently
+/// unindented the first flag and only the first flag.
 pub const COMMON_HELP: &str = "\
-    --scene <NAME|PATH.ron>       a preset or a scene file   [default: photon]
+\x20   --scene <NAME|PATH.ron>       a preset or a scene file   [default: photon]
                                   presets: photon, cavity, slab
     --extent <CELLS>              cube side in cells         [default: 96]
     --resolution <CELLS/M>        rediscretize without moving anything
@@ -201,7 +203,7 @@ pub fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::{Args, Common, SceneSource};
-    use crate::viz::render::ViewMode;
+    use crate::common::render::ViewMode;
     use std::path::PathBuf;
 
     fn args(items: &[&str]) -> Args {

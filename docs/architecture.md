@@ -178,14 +178,47 @@ layer it amplifies by more than 3× per step, so it refuses there. It is the
 right tool for nudging back a frame and the wrong one for a slider. A test
 runs both routes to the same step and requires them to agree.
 
-## Deviation 7: two binaries, and testing the one with a window
+## Deviation 7: the visualizer is an example, and CI runs the one with a window
 
-`diaphane-viz` opens a window; `diaphane-render` writes PNGs. They share the
-renderer and the scene handling and nothing else — one needs an event loop, a
-surface and a swapchain, the other needs none of them. As a single binary with
+The brief treats the solver and the viewer as one program. Here they are a
+library and two example programs, and the split is about dependencies.
+
+A binary target's dependencies are the *library's* dependencies. Putting the
+viewer in a `[[bin]]` with `required-features = ["viz"]` keeps `winit` out of a
+default build, but it is still declared on the crate: it shows up as a feature
+on docs.rs and crates.io, `cargo add diaphane --features viz` pulls a window
+system into someone else's dependency graph, and `--all-features` — which is
+what docs.rs builds with — pulls it into ours. An example's dependencies are
+**dev**-dependencies, which are the one kind cargo does not propagate to
+consumers at all. So `winit` and `png` sit there, the manifest's
+`[dependencies]` is four crates and a window system is not expressible:
+
+```
+cargo tree --all-features -e normal
+diaphane
+├── blade-graphics   ├── bytemuck   ├── ron
+├── blade-macros     ├── log        └── serde
+```
+
+That is asserted in CI, not assumed. `serde` stays a real optional feature
+because scene files are library API rather than something only the examples
+need; the examples reach it through a dev-dependency on the crate itself, which
+also means a bare `cargo test` covers the scene format.
+
+The cost is that an example cannot be `cargo install`ed. If the viewer ever
+wants to ship as a program people install rather than run from a checkout, it
+has to become its own package at that point — which is a mechanical move of
+`examples/` into a crate, and the reason to make it would be distribution, not
+dependency hygiene.
+
+`viz` opens a window; `render` writes PNGs. They share the renderer, the scene
+handling and the command line, and nothing else — one needs an event loop, a
+surface and a swapchain, the other needs none of them. As a single program with
 a `--frames` switch, every flag had to carry an implicit "in which mode", and
 worse: the windowed half was a subset that CI never ran, so it was the only
-component whose breakage nobody would notice until someone opened it.
+component whose breakage nobody would notice until someone opened it. Cargo has
+no way for one example to depend on another, so the shared half is a module
+both pull in with `#[path]` and is compiled once per program.
 
 `--exit-after N` presents a fixed number of frames and quits. That is what
 makes the viewer runnable under Xvfb, where nobody is there to press escape,
@@ -222,9 +255,8 @@ numbers and the caveats.
 
 ## Layout
 
-One crate. The library is headless by default; the visualizer is two binary
-targets behind the `viz` feature, so depending on the solver never pulls in a
-window system.
+One crate, and it is the solver. Everything under `examples/` is a
+dev-dependency away from anyone who depends on it.
 
 ```
 src/grid.rs        Yee grid, extents, indexing, staggering convention
@@ -236,8 +268,9 @@ src/timeline.rs    keyframes and seeking
 src/cpu.rs         reference solver
 src/gpu.rs         blade compute solver
 src/shaders/fdtd.wgsl
-src/viz/           the visualizer, behind the `viz` feature
-src/bin/           diaphane-viz (windowed) and diaphane-render (offscreen)
+examples/common/   camera, command line, and the volume render pass
+examples/viz/      the viewer: a window, an orbit camera, a scrub bar
+examples/render/   the same view, written to PNGs. No display needed
 tests/             analytic validation, CPU/GPU parity, the scene format
 benches/           throughput, and comparison against the ecosystem
 scenes/            curated example scenes

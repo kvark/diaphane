@@ -50,21 +50,22 @@ independent ways to move backwards:
 
 ## What is here
 
-One crate. The library is the solver and is **headless by default** — nothing
-in the default feature set knows what a window is, so `diaphane` can be
-depended on, tested in CI, or embedded elsewhere without dragging one in. CI
-asserts that rather than trusting it.
+One crate, and it is the solver. The library is headless under **every**
+feature, not merely by default: `winit` and `png` are dev-dependencies, so
+there is no switch anyone can throw that puts a window system into a dependency
+graph containing `diaphane`. CI asserts that with `--all-features` rather than
+trusting it.
 
-The visualizer is two binary targets behind the `viz` feature:
+The visualizer is two examples, which is what makes that true:
 
 | | |
 |---|---|
-| `diaphane-viz` | the viewer: a window, an orbit camera, and a scrub bar. |
-| `diaphane-render` | the same view, written to PNGs. Needs no display. |
+| `cargo viz` | the viewer: a window, an orbit camera, and a scrub bar. |
+| `cargo render` | the same view, written to PNGs. Needs no display. |
 
-They share the render pass and nothing else — one needs an event loop and a
-surface, the other needs neither, which is what lets CI run the second on a
-headless machine and the first under Xvfb.
+They share the render pass and their command line, and nothing else — one needs
+an event loop and a surface, the other needs neither, which is what lets CI run
+the second on a headless machine and the first under Xvfb.
 
 The solver comes in two implementations of the same physics. `diaphane::gpu` is
 the blade compute pipeline and is the one that has to be fast.

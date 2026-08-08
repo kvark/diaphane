@@ -3,8 +3,9 @@
 //! Diaphane solves Maxwell's curl equations on a Yee grid in three dimensions
 //! and keeps the solver and the renderer in the same GPU memory, so the fields
 //! can be watched while they evolve rather than post-processed afterwards. This
-//! crate is the headless half: it has no windowing dependency and runs
-//! anywhere, including in CI.
+//! crate is the headless half, and headless under every feature: nothing it
+//! links knows what a window is, so it runs anywhere, including in CI. The
+//! visualizer that does open one is an example — see `cargo viz`.
 //!
 //! # Two solvers
 //!
@@ -47,9 +48,6 @@ pub mod material;
 pub mod scene;
 pub mod source;
 pub mod timeline;
-
-#[cfg(feature = "viz")]
-pub mod viz;
 
 pub use boundary::Boundary;
 pub use grid::{Axis, Extent, Grid};

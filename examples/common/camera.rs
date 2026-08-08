@@ -1,6 +1,6 @@
 //! An orbit camera, in cell units.
 
-use crate::Extent;
+use diaphane::Extent;
 use std::f32;
 
 /// Orbits the centre of the domain.
@@ -92,7 +92,7 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::Camera;
-    use crate::Extent;
+    use diaphane::Extent;
 
     #[test]
     fn looks_at_the_centre_of_the_domain() {
