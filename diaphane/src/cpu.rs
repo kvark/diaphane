@@ -153,6 +153,76 @@ impl Simulation {
         }
     }
 
+    /// Whether stepping backwards is numerically meaningful here.
+    ///
+    /// False as soon as anything in the scene is lossy — see [`Self::reverse`].
+    pub fn is_reversible(&self) -> bool {
+        let lossless = self
+            .coefficients
+            .iter()
+            .all(|c| c.electric_loss == 0.0 && c.magnetic_loss == 0.0);
+        lossless && self.absorber.peak() == 0.0
+    }
+
+    /// Undoes one step, exactly.
+    ///
+    /// # Leapfrog is an involution
+    ///
+    /// The forward step is
+    ///
+    /// ```text
+    /// H ← ((1−m)·H − g_h·curl E) / (1+m)
+    /// E ← ((1−l)·E + g_e·curl H) / (1+l)
+    /// ```
+    ///
+    /// and undoing it means running the two in the opposite order with the
+    /// algebra inverted:
+    ///
+    /// ```text
+    /// E ← ((1+l)·E − g_e·curl H) / (1−l)
+    /// H ← ((1+m)·H + g_h·curl E) / (1−m)
+    /// ```
+    ///
+    /// With no loss that is the *same* arithmetic with the gains negated and
+    /// the order swapped. In exact arithmetic the round trip is the identity;
+    /// in `f32` it drifts by about `√N·ε`, because `a + b − b` is not `a`.
+    /// Sources come back out exactly, since a waveform is a pure function of
+    /// time.
+    ///
+    /// # Why loss forbids it
+    ///
+    /// The reverse step divides by `(1−l)`. In the absorbing layer the
+    /// half-loss peaks near `0.69`, so reversing *amplifies* by more than 3×
+    /// per step in the outermost cells — ten steps back is a factor of 10⁵ on
+    /// whatever noise is there. A perfect conductor is worse still: `l = 1`
+    /// exactly, so the forward map is singular and the information is not
+    /// merely hard to recover, it is gone.
+    ///
+    /// Panics rather than returning garbage, because garbage here looks like
+    /// an exponentially growing field and would be blamed on the solver.
+    pub fn reverse(&mut self) {
+        assert!(
+            self.is_reversible(),
+            "this scene is lossy, and running a dissipative update backwards \
+             amplifies roundoff exponentially; reversal needs Boundary::Pec \
+             and no conductive material"
+        );
+        assert!(self.step > 0, "cannot step back past the start");
+
+        // Forward order is H, E, inject; so backward is un-inject, un-E, un-H.
+        let time = self.step as f32 * self.grid.time_step();
+        self.retract(time);
+        self.reverse_electric();
+        self.reverse_magnetic();
+        self.step -= 1;
+    }
+
+    pub fn reverse_by(&mut self, steps: u64) {
+        for _ in 0..steps {
+            self.reverse();
+        }
+    }
+
     /// `H[a] ← ((1−m)·H[a] − gain·(∂E[c]/∂b − ∂E[b]/∂c)) / (1+m)`, forward
     /// differences.
     fn update_magnetic(&mut self) {
@@ -229,14 +299,95 @@ impl Simulation {
         }
     }
 
+    /// The inverse of [`Self::update_electric`], over the same cells.
+    ///
+    /// `E ← ((1+l)·E − gain·curl H) / (1−l)`. The loop bounds have to match
+    /// the forward sweep exactly: a cell the forward step skipped and this one
+    /// touched would not be undone, it would be corrupted.
+    fn reverse_electric(&mut self) {
+        let extent = self.grid.extent.as_array();
+        let strides = self.grid.extent.strides();
+        for axis in Axis::ALL {
+            let (a, b, c) = (axis.index(), axis.next().index(), axis.prev().index());
+            let (stride_b, stride_c) = (strides[b], strides[c]);
+            let mut start = [0; 3];
+            start[b] = 1;
+            start[c] = 1;
+
+            let target = &mut self.electric[a];
+            let field_b = &self.magnetic[b];
+            let field_c = &self.magnetic[c];
+            for z in start[2]..extent[2] {
+                for y in start[1]..extent[1] {
+                    let row = (z * extent[1] + y) * extent[0];
+                    let (absorb_x, absorb_row) = self.absorber.electric_row(axis, y, z);
+                    for (x, &absorb) in absorb_x.iter().enumerate().skip(start[0]) {
+                        let index = row + x;
+                        let curl = (field_c[index] - field_c[index - stride_b])
+                            - (field_b[index] - field_b[index - stride_c]);
+                        let coefficients = self.coefficients[self.material_index[index] as usize];
+                        let loss = coefficients.electric_loss + absorb_row + absorb;
+                        target[index] = ((1.0 + loss) * target[index]
+                            - coefficients.electric_gain * curl)
+                            / (1.0 - loss);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The inverse of [`Self::update_magnetic`], over the same cells.
+    fn reverse_magnetic(&mut self) {
+        let extent = self.grid.extent.as_array();
+        let strides = self.grid.extent.strides();
+        for axis in Axis::ALL {
+            let (a, b, c) = (axis.index(), axis.next().index(), axis.prev().index());
+            let (stride_b, stride_c) = (strides[b], strides[c]);
+            let mut limit = extent;
+            limit[b] -= 1;
+            limit[c] -= 1;
+
+            let target = &mut self.magnetic[a];
+            let field_b = &self.electric[b];
+            let field_c = &self.electric[c];
+            for z in 0..limit[2] {
+                for y in 0..limit[1] {
+                    let row = (z * extent[1] + y) * extent[0];
+                    let (absorb_x, absorb_row) = self.absorber.magnetic_row(axis, y, z);
+                    for (x, &absorb) in absorb_x.iter().enumerate().take(limit[0]) {
+                        let index = row + x;
+                        let curl = (field_c[index + stride_b] - field_c[index])
+                            - (field_b[index + stride_c] - field_b[index]);
+                        let coefficients = self.coefficients[self.material_index[index] as usize];
+                        let loss = coefficients.magnetic_loss + absorb_row + absorb;
+                        target[index] = ((1.0 + loss) * target[index]
+                            + coefficients.magnetic_gain * curl)
+                            / (1.0 - loss);
+                    }
+                }
+            }
+        }
+    }
+
     /// Adds every source into `E`. Additive, never assigning — see
     /// [`crate::source`].
     fn inject(&mut self, time: f32) {
+        self.apply_sources(time, 1.0);
+    }
+
+    /// Takes them back out again, for [`Self::reverse`]. Exact, because a
+    /// waveform is a pure function of time.
+    fn retract(&mut self, time: f32) {
+        self.apply_sources(time, -1.0);
+    }
+
+    fn apply_sources(&mut self, time: f32, sign: f32) {
         for source in self.sources.iter() {
             let injection = source.injection(&self.grid, time);
             if injection.value == 0.0 {
                 continue;
             }
+            let value = sign * injection.value;
             let target = &mut self.electric[injection.component];
             for dz in 0..injection.extent[2] {
                 for dy in 0..injection.extent[1] {
@@ -246,8 +397,7 @@ impl Simulation {
                             injection.origin[1] + dy,
                             injection.origin[2] + dz,
                         ];
-                        target[self.grid.extent.index(coord)] +=
-                            injection.value * injection.weight(coord);
+                        target[self.grid.extent.index(coord)] += value * injection.weight(coord);
                     }
                 }
             }
@@ -451,6 +601,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stepping_back_undoes_stepping_forward() {
+        // Leapfrog is an exact involution in a lossless box. What this checks
+        // that the plane-wave test cannot is that the forward and reverse
+        // sweeps cover exactly the same cells: a cell updated one way and not
+        // the other would not be undone, it would be corrupted.
+        let scene = pulse_scene(Extent::cube(32)).with_boundary(Boundary::Pec);
+        let mut simulation = Simulation::new(&scene);
+        assert!(simulation.is_reversible());
+
+        simulation.advance_by(60);
+        let before: Vec<f32> = Axis::ALL
+            .iter()
+            .flat_map(|&axis| simulation.electric(axis).iter().copied())
+            .chain(
+                Axis::ALL
+                    .iter()
+                    .flat_map(|&axis| simulation.magnetic(axis).iter().copied()),
+            )
+            .collect();
+        let peak = before.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+        assert!(peak > 0.0);
+
+        simulation.advance_by(200);
+        simulation.reverse_by(200);
+        assert_eq!(simulation.step_count(), 60);
+
+        let after: Vec<f32> = Axis::ALL
+            .iter()
+            .flat_map(|&axis| simulation.electric(axis).iter().copied())
+            .chain(
+                Axis::ALL
+                    .iter()
+                    .flat_map(|&axis| simulation.magnetic(axis).iter().copied()),
+            )
+            .collect();
+        let worst = before
+            .iter()
+            .zip(after.iter())
+            .fold(0.0f32, |acc, (&a, &b)| acc.max((a - b).abs()));
+        // 400 steps of f32 arithmetic; the drift is roundoff, not error.
+        assert!(
+            worst < 1e-4 * peak,
+            "round trip drifted by {:e} against a peak of {peak:e}",
+            worst / peak
+        );
+    }
+
+    #[test]
+    fn reversing_all_the_way_returns_to_an_empty_domain() {
+        let scene = pulse_scene(Extent::cube(24)).with_boundary(Boundary::Pec);
+        let mut simulation = Simulation::new(&scene);
+        simulation.advance_by(120);
+        let excited = simulation.energy().total();
+        simulation.reverse_by(120);
+
+        assert_eq!(simulation.step_count(), 0);
+        // The source put the energy in; running time backwards takes it out
+        // again, because injection is a pure function of the step number.
+        let residue = simulation.energy().total();
+        assert!(
+            residue < excited * 1e-8,
+            "{residue:e} left of {excited:e} after unwinding to t = 0"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "lossy")]
+    fn reversal_refuses_a_scene_with_an_absorber() {
+        // The absorbing layer amplifies by more than 3x per step run
+        // backwards. Returning an exponentially growing field would look like
+        // a solver bug, so this refuses instead.
+        let mut simulation = Simulation::new(&pulse_scene(Extent::cube(32)));
+        assert!(!simulation.is_reversible());
+        simulation.advance();
+        simulation.reverse();
+    }
+
+    #[test]
+    #[should_panic(expected = "lossy")]
+    fn reversal_refuses_a_scene_with_a_conductor() {
+        use crate::{material::Material, scene::Shape};
+        let mut scene = pulse_scene(Extent::cube(32)).with_boundary(Boundary::Pec);
+        let metal = scene.materials.push(Material::PERFECT_CONDUCTOR);
+        scene.shapes.push(Shape::Block {
+            center: [8e-3, 0.0, 0.0],
+            size: [4e-3; 3],
+            material: metal,
+        });
+        let mut simulation = Simulation::new(&scene);
+        assert!(!simulation.is_reversible());
+        simulation.advance();
+        simulation.reverse();
     }
 
     #[test]
