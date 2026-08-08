@@ -29,9 +29,35 @@ cargo viz --scene scenes/double-slit.ron
 cargo render --scene cavity --save-scene mine.ron
 ```
 
-[`scenes/`](scenes) has five worked examples — free flight, a conducting
-cavity, a glass slab, a metal sphere, and Young's double slit — each commented
-with what it shows and what to look at.
+[`scenes/`](scenes) has six worked examples — free flight, a conducting cavity,
+a glass slab, a metal sphere, Young's double slit, and a subwavelength film on
+a graded grid — each commented with what it shows and what to look at.
+
+## Cells are boxes, not cubes
+
+Each axis carries its own list of cell widths, so a scene can ask for
+resolution where the physics is small and not pay for it everywhere:
+
+```ron
+refinements: [
+    // 0.1 mm across the film; y and z opt out with a zero size.
+    Refinement(center: (0.0, 0.0, 0.0), size: (0.008, 0.0, 0.0), cell_size: 0.0001),
+],
+max_ratio: 1.15,
+```
+
+This is deliberately the *cheap* end of adaptive refinement. A hierarchy of
+patches buys locality that a tensor product cannot, and costs interpolation at
+every interface, spurious reflection off it, and late-time instability that
+takes tens of thousands of steps to show. A graded dense grid has none of
+those — it stays a plain symmetric leapfrog — and gives up locality instead:
+refining a box refines the slabs it projects onto, all the way through. Right
+for films, layered stacks, wires and boundary layers.
+
+The grading is capped at 1.15× between neighbouring cells, because a centred
+difference is only centred where the spacing is not moving. The cap is
+asserted, the transition is measured to reflect below −40 dB, and a graded
+lossless box is required to hold its energy over 20,000 steps.
 
 ## Time
 

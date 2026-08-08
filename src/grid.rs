@@ -303,11 +303,38 @@ impl Spacing {
 /// in a large empty box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+/// # Opting an axis out
+///
+/// A non-positive `size` on an axis leaves that axis alone entirely. That is
+/// not a degenerate case, it is the common one: a thin film wants resolution
+/// across it and nothing along it, and asking for a "box" would refine the
+/// whole transverse plane — which for a 50 mm domain at 0.1 mm is 500 cells in
+/// each of two directions the field is not varying in. The saving grading
+/// exists to deliver is thrown away by exactly this mistake, so it has a
+/// spelling.
 pub struct Refinement {
     pub center: [f32; 3],
+    /// Full extent of the refined region on each axis. Non-positive means the
+    /// axis is not refined at all.
     pub size: [f32; 3],
     /// Target cell size inside the region, in metres.
     pub cell_size: f32,
+}
+
+impl Refinement {
+    /// Refines one axis only, over `size` metres centred on `offset` — the
+    /// shape a layered structure wants.
+    pub fn across(axis: Axis, offset: f32, size: f32, cell_size: f32) -> Self {
+        let mut center = [0.0; 3];
+        center[axis.index()] = offset;
+        let mut extent = [0.0; 3];
+        extent[axis.index()] = size;
+        Self {
+            center,
+            size: extent,
+            cell_size,
+        }
+    }
 }
 
 /// The discretization: how big the cells are, and how big a time step is.
@@ -494,6 +521,18 @@ impl Grid {
         self.refinements.is_empty()
     }
 
+    /// Largest ratio between neighbouring cells anywhere in the domain.
+    ///
+    /// The number the accuracy of a graded grid turns on: the centred
+    /// difference is only centred where the spacing is not changing, so grading
+    /// gently is what keeps the global error near second order.
+    pub fn worst_ratio(&self) -> f32 {
+        Axis::ALL
+            .iter()
+            .map(|&axis| self.spacing(axis).worst_ratio())
+            .fold(1.0, f32::max)
+    }
+
     /// Cells per metre at the coarse spacing.
     pub fn resolution(&self) -> f32 {
         1.0 / self.base_cell_size
@@ -559,6 +598,39 @@ impl Grid {
     fn gains(&self, widths: &[f32]) -> Vec<f32> {
         let travel = SPEED_OF_LIGHT * self.time_step();
         widths.iter().map(|&width| travel / width).collect()
+    }
+
+    /// Size of the domain in *coarse cells* — metres over the base cell size.
+    ///
+    /// The space a renderer marches in. For a uniform grid it is exactly the
+    /// extent, so a camera written against cell counts keeps behaving
+    /// identically; for a graded one it is the shape the domain actually has,
+    /// rather than the stretched one cell indices describe.
+    pub fn box_size(&self) -> [f32; 3] {
+        self.size().map(|metres| metres / self.base_cell_size)
+    }
+
+    /// Inverse of the cumulative cell width, sampled uniformly: three sections
+    /// of `samples` entries, each giving a fractional cell coordinate.
+    ///
+    /// A renderer needs world → cell for every step of every ray, and on a
+    /// graded axis that is a search. Tabulating it once turns the innermost
+    /// loop of the march back into two loads and a lerp. The map is piecewise
+    /// linear with breaks at the cell corners, so interpolating between samples
+    /// is exact except where a sample interval straddles a corner — and cells
+    /// differ from their neighbours by at most the growth cap, so that error is
+    /// a fraction of a cell.
+    pub fn cell_lookup(&self, samples: u32) -> Vec<f32> {
+        let mut lookup = Vec::with_capacity(3 * samples as usize);
+        for axis in Axis::ALL {
+            let spacing = self.spacing(axis);
+            let length = spacing.length();
+            for sample in 0..samples {
+                let fraction = sample as f32 / (samples - 1) as f32;
+                lookup.push(spacing.coordinate((fraction - 0.5) * length));
+            }
+        }
+        lookup
     }
 
     /// Centre of each cell along one axis, in metres from the domain centre.
@@ -711,6 +783,17 @@ fn grade(
     refinements: &[Refinement],
     max_ratio: f32,
 ) -> Spacing {
+    // A refinement that opts this axis out contributes nothing here, not even
+    // to the sampling rate — otherwise a film refined only across x would set a
+    // lattice fine enough for the film on every axis, and spend the time
+    // building it.
+    let refinements: Vec<&Refinement> = refinements
+        .iter()
+        .filter(|refinement| refinement.size[axis] > 0.0)
+        .collect();
+    if refinements.is_empty() {
+        return Spacing::uniform((length / base).round().max(2.0) as u32, base);
+    }
     let finest = refinements
         .iter()
         .map(|refinement| refinement.cell_size)
@@ -728,7 +811,7 @@ fn grade(
     for (index, width) in target.iter_mut().enumerate() {
         // Refinements are centred on the domain, like all geometry.
         let position = index as f32 * step - 0.5 * length;
-        for refinement in refinements {
+        for refinement in refinements.iter() {
             let half = 0.5 * refinement.size[axis];
             if (position - refinement.center[axis]).abs() <= half {
                 *width = width.min(refinement.cell_size);

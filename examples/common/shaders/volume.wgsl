@@ -15,6 +15,8 @@
 struct ViewParams {
     // nx, ny, nz, cell_count
     extent: vec4<u32>,
+    // domain size in coarse cells, then the lookup sample count per axis
+    box_size: vec4<f32>,
     // camera position in cell units, then the ray-march step in cells
     origin: vec4<f32>,
     // camera right * aspect * tan(fov/2), then exposure
@@ -42,7 +44,30 @@ const MAGNETIC_TINT: vec3<f32> = vec3<f32>(0.20, 0.65, 1.0);
 var<storage, read> electric: array<f32>;
 var<storage, read> magnetic: array<f32>;
 var<storage, read_write> peak: array<atomic<u32>>;
+// Inverse of the cumulative cell width: three sections of `box_size.w`
+// samples, each giving a fractional cell coordinate. See `Grid::cell_lookup`.
+var<storage, read> lookup: array<f32>;
 var<uniform> view: ViewParams;
+
+/// World position, in coarse cells, to a fractional cell coordinate.
+///
+/// The identity on a uniform grid. On a graded one the two spaces differ --
+/// cell indices stretch wherever the mesh is fine -- and marching in index
+/// space would render the refined region several times its actual size. A
+/// tabulated inverse keeps that a pair of loads rather than a search.
+fn cell_of(point: vec3<f32>) -> vec3<f32> {
+    let samples = u32(view.box_size.w);
+    var out = vec3<f32>(0.0);
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        let fraction = clamp(point[axis] / view.box_size[axis], 0.0, 1.0);
+        let position = fraction * f32(samples - 1u);
+        let low = u32(position);
+        let high = min(low + 1u, samples - 1u);
+        let base = axis * samples;
+        out[axis] = mix(lookup[base + low], lookup[base + high], position - f32(low));
+    }
+    return out;
+}
 
 fn cell_index(coord: vec3<u32>) -> u32 {
     return (coord.z * view.extent.y + coord.y) * view.extent.x + coord.x;
@@ -101,7 +126,7 @@ fn signed_log(value: f32, strength: f32) -> f32 {
     return sign(value) * log(1.0 + strength * abs(value)) / log(1.0 + strength);
 }
 
-/// Slab-method intersection with the domain box, in cell units.
+/// Slab-method intersection with the domain box, in coarse-cell units.
 fn intersect_box(origin: vec3<f32>, direction: vec3<f32>, size: vec3<f32>) -> vec2<f32> {
     let inverse = 1.0 / direction;
     let low = (vec3<f32>(0.0) - origin) * inverse;
@@ -149,7 +174,7 @@ fn main_vs(@builtin(vertex_index) index: u32) -> VertexOutput {
 
 @fragment
 fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
-    let size = vec3<f32>(view.extent.xyz);
+    let size = view.box_size.xyz;
     let origin = view.origin.xyz;
     let direction = normalize(
         view.forward.xyz + input.screen.x * view.right.xyz + input.screen.y * view.up.xyz
@@ -189,7 +214,7 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         let point = origin + direction * distance;
         let coord = clamp(
-            vec3<u32>(max(point, vec3<f32>(0.0))),
+            vec3<u32>(max(cell_of(point), vec3<f32>(0.0))),
             vec3<u32>(0u),
             view.extent.xyz - 1u,
         );

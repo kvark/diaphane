@@ -14,6 +14,12 @@ not the constraint and optimizing it is not the lever.
 A shared 4-core cloud VM: Intel Xeon @ 2.8 GHz, 16 GB, **no GPU**. Read
 everything below with that in mind, and in particular:
 
+> **Absolute figures are not comparable across sessions.** The same commit
+> measured 49 Mcell-steps/s on the instance that produced the table below and
+> 33 on a later one — a 1.5× spread from the host, not the code. Any claim about
+> a change has to come from measuring both sides at the same hour, and the ones
+> below do.
+
 > **The "GPU" numbers are lavapipe**, Mesa's software Vulkan rasterizer. They
 > measure the same CPU running WGSL. They are here because they demonstrate the
 > pipeline works end to end and because they show the *shape* of the scaling —
@@ -45,6 +51,32 @@ and the work per dispatch grows as the cube, so small domains are dominated by
 launch cost. A real GPU shows the same shape more sharply: the batching in
 `advance_by` — hundreds of steps encoded into one command buffer — exists
 precisely because of this.
+
+### What a non-uniform grid costs
+
+Cells are boxes rather than cubes, so both curl terms carry a per-cell
+`c·Δt/Δ` instead of one folded constant. Measured against the same machine at
+the same hour, at 64³:
+
+| | Mcell-steps/s |
+|---|---|
+| one folded gain (what a cubic grid could do) | 33.0 |
+| per-axis gains, resolved per row | **27.8** |
+| per-axis gains, `[x, y, z]` indexed by runtime axis | 20.4 |
+
+So about **16%**, and two thirds of what it could have been was addressing
+rather than arithmetic. Exactly one of the two curl terms differences along the
+innermost axis, so exactly one gain varies down a row; folding the other into a
+scalar and walking only the varying one recovers the difference between the
+last two rows. The GPU path is unchanged within the noise of this machine —
+it was already reading a material index per cell, and two more small
+cache-resident arrays cost nothing on a kernel that is waiting for memory.
+
+The uniform case pays that 16% too, deliberately: uniform is a `Spacing` whose
+widths happen to be equal, so there is one code path and the graded one cannot
+rot from disuse. A fast path for cubic grids would buy the 16% back and would
+be the second implementation of the update — which is the thing the CPU/GPU
+parity test exists to avoid needing twice.
 
 ### What the absorbing boundary costs
 
