@@ -6,6 +6,13 @@
 //! crate is the headless half: it has no windowing dependency and runs
 //! anywhere, including in CI.
 //!
+//! # Two solvers
+//!
+//! [`cpu::Simulation`] is the reference implementation -- plain loops, no
+//! intrinsics, no threads. [`gpu::Simulation`] is the same physics as a blade
+//! compute pipeline. They are written independently and checked against each
+//! other so that a shader bug has somewhere to show up; see `tests/parity.rs`.
+//!
 //! # Where the physics is written down
 //!
 //! - [`grid`] -- the Yee staggering convention and the discrete dispersion
@@ -33,6 +40,7 @@
 
 pub mod boundary;
 pub mod cpu;
+pub mod gpu;
 pub mod grid;
 pub mod material;
 pub mod scene;
