@@ -10,7 +10,7 @@
 // branch anywhere in the kernel.
 //
 // Try:
-//   cargo run --release -p diaphane-viz -- --scene scenes/metal-sphere.ron --mode electric --warmup 200
+//   cargo viz --scene scenes/metal-sphere.ron --mode electric --warmup 200
 
 Scene(
     grid: Grid(

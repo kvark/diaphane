@@ -16,7 +16,7 @@
 // broadband, and the box needs time to settle into the modes that survive.
 //
 // Try:
-//   cargo run --release -p diaphane-viz -- --scene scenes/cavity.ron --warmup 400
+//   cargo viz --scene scenes/cavity.ron --warmup 400
 
 Scene(
     grid: Grid(

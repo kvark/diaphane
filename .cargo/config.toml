@@ -1,0 +1,5 @@
+# The visualizer lives behind a feature, so that depending on the solver never
+# drags in a window system. These spell the rest so it stays one word.
+[alias]
+viz = "run --release --features viz --bin diaphane-viz --"
+render = "run --release --features viz --bin diaphane-render --"

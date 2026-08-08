@@ -6,11 +6,13 @@
 //! nothing else: no event loop, no surface, no display.
 
 use crate::{
-    options::{Common, TIMEOUT_MS},
-    render::{Capture, Renderer, ScrubBar},
+    gpu::Simulation,
+    viz::{
+        options::{Common, TIMEOUT_MS},
+        render::{Capture, Renderer, ScrubBar},
+    },
 };
 use blade_graphics as gpu;
-use diaphane::gpu::Simulation;
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -58,7 +60,7 @@ pub fn save_scene(options: &Options, path: &Path) -> Result<(), Box<dyn Error>> 
 /// Renders `frames` frames to PNGs without ever touching a window system.
 pub fn run(options: &Options) -> Result<(), Box<dyn Error>> {
     let frames = options.frames;
-    let context = diaphane::gpu::headless_context()?;
+    let context = crate::gpu::headless_context()?;
     println!(
         "device: {}",
         context.device_information().device_name.trim()

@@ -11,7 +11,7 @@
 // All lengths are metres, measured from the centre of the domain.
 //
 // Try:
-//   cargo run --release -p diaphane-viz -- --scene scenes/free-flight.ron --mode electric
+//   cargo viz --scene scenes/free-flight.ron --mode electric
 
 Scene(
     // 96 mm cube at 1 mm per cell. Sixteen cells per wavelength keeps

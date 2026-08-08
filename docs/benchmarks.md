@@ -1,8 +1,8 @@
 # Benchmarks
 
 ```
-cargo bench -p diaphane --bench throughput   # our two solvers
-cargo bench -p diaphane --bench ecosystem    # against oxiphoton
+cargo bench --bench throughput   # our two solvers
+cargo bench --bench ecosystem    # against oxiphoton
 ```
 
 FDTD is a memory-bandwidth-bound stencil, so the unit is **cell-updates per

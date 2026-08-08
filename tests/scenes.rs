@@ -11,12 +11,7 @@ use diaphane::{Extent, Material, Scene, Shape, cpu};
 use std::{fs, path::PathBuf};
 
 fn scene_directory() -> PathBuf {
-    // `CARGO_MANIFEST_DIR` is the crate, and `scenes/` sits beside it at the
-    // workspace root.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate directory has a parent")
-        .join("scenes")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenes")
 }
 
 fn scene_files() -> Vec<PathBuf> {

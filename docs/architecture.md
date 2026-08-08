@@ -37,17 +37,17 @@ implemented. What is implemented is the observation half of the instrument.
 The brief describes one solver, on the GPU. This repository has two, computing
 the same thing:
 
-- [`Simulation`](../diaphane/src/cpu.rs) — a plain Rust reference. Loops in
+- [`Simulation`](../src/cpu.rs) — a plain Rust reference. Loops in
   `f32`, no intrinsics, no threads.
-- [`gpu::Simulation`](../diaphane/src/gpu.rs) — the blade compute pipeline,
+- [`gpu::Simulation`](../src/gpu.rs) — the blade compute pipeline,
   which is the one that has to be fast.
 
 This is not redundancy for its own sake. It buys three things:
 
 1. **The validation suite runs anywhere.** The analytic checks in
-   [`tests/validation.rs`](../diaphane/tests/validation.rs) need no GPU, so
+   [`tests/validation.rs`](../tests/validation.rs) need no GPU, so
    "is the physics right" is answered independently of "is the shader right".
-2. **The shader gets an oracle.** [`tests/parity.rs`](../diaphane/tests/parity.rs)
+2. **The shader gets an oracle.** [`tests/parity.rs`](../tests/parity.rs)
    steps both solvers over the same scene and requires them to agree to 1e-4 of
    the field peak. An FDTD bug that is a half-cell offset produces a
    plausible-looking wave either way; a numerical comparison against an
@@ -59,10 +59,10 @@ This is not redundancy for its own sake. It buys three things:
    ecosystem today is CPU-resident. Comparing our GPU number against them
    measures the hardware, not the code. Comparing CPU against CPU measures the
    code, and the GPU speedup is then reported separately against our own CPU
-   path. See [`benches/`](../diaphane/benches).
+   path. See [`benches/`](../benches).
 
 The two implementations share the coefficient derivation
-([`material.rs`](../diaphane/src/material.rs)) and the scene description, but
+([`material.rs`](../src/material.rs)) and the scene description, but
 not the stepping loop — a shared loop would make the parity test tautological.
 
 ## Deviation 3: a graded matched lossy layer instead of Mur, before CPML
@@ -112,8 +112,8 @@ changing — which is the single most useful thing a saved scene enables, and th
 only routine defence against an under-resolved result that looks entirely
 convincing.
 
-So [`Shape`](../diaphane/src/scene.rs) and
-[`SourceShape`](../diaphane/src/source.rs) are in **metres, with the origin at
+So [`Shape`](../src/scene.rs) and
+[`SourceShape`](../src/source.rs) are in **metres, with the origin at
 the centre of the domain**. Centred rather than cornered because geometry then
 survives a change of *domain size* too — growing the box to give a wave more
 room would otherwise drag every object along with the far wall. Boxes are given
@@ -129,7 +129,7 @@ wanted — a sphere at "20" is twenty metres out and silently paints nothing. So
 `Scene::validate` rejects geometry that lies entirely outside the domain and
 sources outside it, and says so in those words.
 
-[`Scene::with_resolution`]: ../diaphane/src/scene.rs
+[`Scene::with_resolution`]: ../src/scene.rs
 
 ## Deviation 5: no `egui` yet
 
@@ -165,13 +165,13 @@ The brief asks for play/pause/step/reset. What is here is a scrub bar, and it
 works because the state is a pure function of `(scene, step)` — so any step can
 be *reproduced* rather than recorded.
 
-[`Timeline`](../diaphane/src/timeline.rs) is a ring of keyframes that bounds
+[`Timeline`](../src/timeline.rs) is a ring of keyframes that bounds
 the replay cost; seeking outside the window falls back to replaying from zero,
 which is slower and always correct. The memory is stated rather than hidden:
 24 bytes per cell per keyframe, 50 MB each at 128³, so the interval trades
 scrub latency against the bill.
 
-[`cpu::Simulation::reverse`](../diaphane/src/cpu.rs) is the other half.
+[`cpu::Simulation::reverse`](../src/cpu.rs) is the other half.
 Leapfrog is an exact involution, so a lossless box runs backwards with no
 memory at all — but it costs one step per step, and through the absorbing
 layer it amplifies by more than 3× per step, so it refuses there. It is the
@@ -222,18 +222,23 @@ numbers and the caveats.
 
 ## Layout
 
+One crate. The library is headless by default; the visualizer is two binary
+targets behind the `viz` feature, so depending on the solver never pulls in a
+window system.
+
 ```
-diaphane/          headless solver library. No windowing dependency.
-  src/grid.rs        Yee grid, extents, indexing, staggering convention
-  src/material.rs    materials and their update coefficients
-  src/boundary.rs    separable graded absorbing profiles
-  src/source.rs      waveforms and source geometry
-  src/scene.rs       serializable scene description
-  src/cpu.rs         reference solver
-  src/gpu.rs         blade compute solver
-  src/shaders/fdtd.wgsl
-  tests/             analytic validation and CPU/GPU parity
-  benches/           throughput, and comparison against the ecosystem
-diaphane-viz/      the visualizer binary: winit + blade volume rendering
-docs/
+src/grid.rs        Yee grid, extents, indexing, staggering convention
+src/material.rs    materials and their update coefficients
+src/boundary.rs    separable graded absorbing profiles
+src/source.rs      waveforms and source geometry
+src/scene.rs       serializable scene description
+src/timeline.rs    keyframes and seeking
+src/cpu.rs         reference solver
+src/gpu.rs         blade compute solver
+src/shaders/fdtd.wgsl
+src/viz/           the visualizer, behind the `viz` feature
+src/bin/           diaphane-viz (windowed) and diaphane-render (offscreen)
+tests/             analytic validation, CPU/GPU parity, the scene format
+benches/           throughput, and comparison against the ecosystem
+scenes/            curated example scenes
 ```

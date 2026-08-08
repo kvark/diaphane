@@ -22,7 +22,7 @@
 // outer fringes clear of the background.
 //
 // Try:
-//   cargo run --release -p diaphane-viz -- --scene scenes/double-slit.ron --mode electric --warmup 330 --gain 3.5
+//   cargo viz --scene scenes/double-slit.ron --mode electric --warmup 330 --gain 3.5
 
 Scene(
     grid: Grid(

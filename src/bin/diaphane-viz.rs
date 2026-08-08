@@ -1,6 +1,6 @@
 //! Watch a 3D electromagnetic field evolve, in a window.
 
-use diaphane_viz::{
+use diaphane::viz::{
     app,
     options::{Args, COMMON_HELP, Common, init_logging},
 };
