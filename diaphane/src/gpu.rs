@@ -342,9 +342,17 @@ impl Simulation {
                         height: injection.extent[1] as u32,
                         depth: injection.extent[2] as u32,
                     };
-                    let mut encoder = pass.with(&pipelines.inject);
-                    encoder.bind(0, &FieldData::new(buffers, *params));
-                    encoder.dispatch(pipelines.inject.get_dispatch_for(region));
+                    // The pipeline context is scoped so it is dropped before
+                    // the barrier. On Metal it carries a `Drop` that ends the
+                    // encoding, so holding it across another `pass` call is a
+                    // borrow error there — while on Vulkan the same code
+                    // compiles happily. Backend-specific borrow behaviour is
+                    // invisible until the other platform builds it.
+                    {
+                        let mut encoder = pass.with(&pipelines.inject);
+                        encoder.bind(0, &FieldData::new(buffers, *params));
+                        encoder.dispatch(pipelines.inject.get_dispatch_for(region));
+                    }
                     // Sources may overlap, and each dispatch reads what the
                     // previous one wrote.
                     pass.barrier();
