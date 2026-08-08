@@ -26,7 +26,8 @@ call.
 
 ```
 cargo run --release -p diaphane-viz -- --scene scenes/double-slit.ron
-cargo run --release -p diaphane-viz -- --scene cavity --save-scene mine.ron
+cargo run --release -p diaphane-viz --bin diaphane-render -- \
+    --scene cavity --save-scene mine.ron
 ```
 
 [`scenes/`](scenes) has five worked examples — free flight, a conducting

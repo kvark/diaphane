@@ -133,10 +133,10 @@ sources outside it, and says so in those words.
 
 ## Deviation 5: no `egui` yet
 
-The brief's Phase 3 is an interaction layer built on egui. The visualizer here
-has time controls, camera control, view-mode switching, brightness and
-signed-log toggles on the keyboard, with the perf HUD — steps/s, effective
-GB/s, frame time, simulation time — in the window title.
+The brief's Phase 3 is an interaction layer built on egui. The viewer here has
+time controls, camera control, view-mode switching, brightness and signed-log
+toggles on the keyboard, with the perf HUD — steps/s, effective GB/s, frame
+time, simulation time, keyframe count and memory — in the window title.
 
 Scene authoring is by **file**, not by pointer. `--scene <path.ron>` loads one
 and `--save-scene <path>` writes the resolved scene out, so the way in is: take
@@ -177,6 +177,28 @@ memory at all — but it costs one step per step, and through the absorbing
 layer it amplifies by more than 3× per step, so it refuses there. It is the
 right tool for nudging back a frame and the wrong one for a slider. A test
 runs both routes to the same step and requires them to agree.
+
+## Deviation 7: two binaries, and testing the one with a window
+
+`diaphane-viz` opens a window; `diaphane-render` writes PNGs. They share the
+renderer and the scene handling and nothing else — one needs an event loop, a
+surface and a swapchain, the other needs none of them. As a single binary with
+a `--frames` switch, every flag had to carry an implicit "in which mode", and
+worse: the windowed half was a subset that CI never ran, so it was the only
+component whose breakage nobody would notice until someone opened it.
+
+`--exit-after N` presents a fixed number of frames and quits. That is what
+makes the viewer runnable under Xvfb, where nobody is there to press escape,
+and CI does exactly that — covering winit's event loop, surface creation, and
+swapchain acquire and present. It reports frames presented and steps per
+second, so a silent no-op cannot pass for a success.
+
+The same reasoning applies one level down: blade picks its backend by target,
+so the Metal path never compiles on Linux, and it differs enough to break on
+its own — a pipeline context there carries a `Drop` that holds a borrow, which
+turns code Vulkan accepts into an error. CI cross-checks
+`--target aarch64-apple-darwin` from the Linux lint job, which costs twenty
+seconds instead of a macOS runner.
 
 ## What carried over unchanged
 
