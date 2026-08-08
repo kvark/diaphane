@@ -72,16 +72,35 @@ what CI runs against, so the GPU path is exercised rather than merely compiled.
 
 ## Benchmarks
 
-`cargo bench -p diaphane` reports throughput in cell-steps per second for both
-solvers, and compares the reference solver against the FDTD implementation in
-[`oxiphoton`](https://crates.io/crates/oxiphoton). See
-[`diaphane/benches`](diaphane/benches).
+FDTD is bandwidth-bound, so the unit is cell-updates per second. On the same
+48³ free-space problem, single-threaded:
+
+| | throughput |
+|---|---|
+| **diaphane** (`f32`, matched lossy layer) | **56 Mcell-steps/s** |
+| [`oxiphoton`](https://crates.io/crates/oxiphoton) (`f64`, CPML) | 20–23 Mcell-steps/s |
+
+About 2.5×, and most of it is a design choice rather than better code:
+oxiphoton carries `f64` fields and twelve full-domain CPML `ψ` arrays, which is
+roughly 6× the bytes per cell. Converting only part of a 6× traffic advantage
+into a 2.5× speed advantage means there is headroom left on our side.
+
+Those choices buy oxiphoton real things — CPML handles grazing incidence that a
+graded conductivity cannot, and `f64` matters for high-`Q` ringdown. The full
+numbers, the caveats, and what is deliberately *not* being compared are in
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
+```
+cargo bench -p diaphane
+```
 
 ## Documentation
 
 - [`docs/design.md`](docs/design.md) — the original design brief
 - [`docs/architecture.md`](docs/architecture.md) — what was built, and where it
   departs from that brief and why
+- [`docs/benchmarks.md`](docs/benchmarks.md) — measured throughput, and what the
+  comparison does and does not mean
 
 ## License
 
