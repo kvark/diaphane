@@ -14,8 +14,25 @@
 //! - [`boundary`] -- what happens at the walls.
 //! - [`source`] -- why a source has to be soft and zero-mean.
 //! - [`scene`] -- everything needed to reproduce a run.
+//!
+//! # Getting started
+//!
+//! ```
+//! use diaphane::{Extent, Scene, cpu};
+//!
+//! // A transversely apodized wave packet in free space, with absorbing walls.
+//! let scene = Scene::photon(Extent::cube(48));
+//! scene.validate().unwrap();
+//!
+//! let mut simulation = cpu::Simulation::new(&scene);
+//! simulation.advance_by(100);
+//!
+//! let energy = simulation.energy();
+//! assert!(energy.total() > 0.0);
+//! ```
 
 pub mod boundary;
+pub mod cpu;
 pub mod grid;
 pub mod material;
 pub mod scene;
