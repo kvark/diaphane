@@ -281,9 +281,38 @@ scheme's second-order accuracy rests on a centred difference actually being
 centred, and a change of spacing breaks that locally. The cap is a contract:
 `Spacing::worst_ratio` is asserted, not observed.
 
-It costs about 16% of the CPU reference's throughput and nothing measurable on
-the GPU. [`tests/graded.rs`](../tests/graded.rs) is where the claims above are
-numbers rather than assertions.
+### What it costs, measured
+
+| | |
+|---|---|
+| agreement with a uniformly fine grid | 0.6% of peak |
+| cells saved, 4× refinement over 8% of an axis | 3.0× |
+| energy drift, graded PEC cavity, 20,000 steps | 4.9e−4 |
+| CPU reference throughput | −16% |
+| GPU throughput | within noise |
+| **reflection off the transition, cap 1.15** | **−32.5 dB** |
+| reflection off the transition, cap 1.05 | −52.4 dB |
+
+That last pair is the number to keep an eye on, and the reason the cap is a
+scene-level knob rather than a constant. At the default a refinement boundary
+reflects about **25 dB louder than the absorbing walls** — so in a scene with a
+refinement, the loudest artifact in the domain is the mesh. Grading at 1.05
+buys 20 dB of that back and costs roughly a third of the cell saving, because
+relaxing 4× takes 28 cells per side instead of 10. Which is right depends on
+whether you are looking or measuring, so the default is the conventional figure
+and the trade is written down here rather than decided for you.
+
+There is one more thing a graded grid changes that is easy to get wrong, and it
+is not in the update at all: **the six field components integrate over six
+different volumes**. `E[a]` spans a whole cell along `a` and half cells across
+it; `H[a]` is the mirror. Using a single per-cell volume in `cpu::Energy`
+measures a quantity the scheme does not conserve, and as a cavity mode sloshes
+energy between coarse and fine regions the total wanders — 0.2% over 20,000
+steps, which reads exactly like the secular drift that number exists to detect.
+It was 4× that before the volumes were separated.
+
+[`tests/graded.rs`](../tests/graded.rs) is where all of the above are numbers
+rather than assertions.
 
 ## What carried over unchanged
 
