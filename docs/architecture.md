@@ -39,8 +39,8 @@ the same thing:
 
 - [`Simulation`](../diaphane/src/cpu.rs) — a plain Rust reference. Loops in
   `f32`, no intrinsics, no threads.
-- [`GpuSimulation`](../diaphane/src/gpu.rs) — the blade compute pipeline, which
-  is the one that has to be fast.
+- [`gpu::Simulation`](../diaphane/src/gpu.rs) — the blade compute pipeline,
+  which is the one that has to be fast.
 
 This is not redundancy for its own sake. It buys three things:
 
@@ -48,10 +48,13 @@ This is not redundancy for its own sake. It buys three things:
    [`tests/validation.rs`](../diaphane/tests/validation.rs) need no GPU, so
    "is the physics right" is answered independently of "is the shader right".
 2. **The shader gets an oracle.** [`tests/parity.rs`](../diaphane/tests/parity.rs)
-   steps both solvers over the same scene and requires agreement to `f32`
-   roundoff. An FDTD bug that is a half-cell offset produces a
-   plausible-looking wave either way; a bit-level comparison against an
+   steps both solvers over the same scene and requires them to agree to 1e-4 of
+   the field peak. An FDTD bug that is a half-cell offset produces a
+   plausible-looking wave either way; a numerical comparison against an
    independently written implementation does not care how plausible it looks.
+   The tolerance is not zero because the two do the same arithmetic in
+   different orders and the GPU may contract multiply-adds where the CPU may
+   not — demanding bit equality would mean pinning the shader compiler.
 3. **The benchmark has an honest baseline.** Every FDTD package in the Rust
    ecosystem today is CPU-resident. Comparing our GPU number against them
    measures the hardware, not the code. Comparing CPU against CPU measures the
@@ -103,9 +106,15 @@ test runs in.
 ## Deviation 4: no `egui` yet
 
 The brief's Phase 3 is an interaction layer built on egui. The visualizer here
-has time controls, camera control, view-mode switching and a perf HUD, all on
-the keyboard, with readouts in the window title and on the terminal. Scene
-authoring is through RON files rather than a pointer.
+has time controls, camera control, view-mode switching, brightness and
+signed-log toggles on the keyboard, with the perf HUD — steps/s, effective
+GB/s, frame time, simulation time — in the window title.
+
+Scene *authoring* is not implemented at all. Scenes are the three presets in
+[`scene.rs`](../diaphane/src/scene.rs), selected with `--scene`. The types
+derive `serde` behind a feature flag, so file-based scenes are a small step,
+but nothing reads or writes one yet and the brief's painting and dragging are
+untouched.
 
 ## What carried over unchanged
 
@@ -120,9 +129,12 @@ authoring is through RON files rather than a pointer.
 - `S = 0.5` by default, comfortably under the 3D limit of `1/√3`.
 - Perf HUD from the first version, not the last.
 
-## Layout
+## What it costs
 
-See [`benchmarks.md`](benchmarks.md) for what this costs and buys, measured.
+Measured, on an identical free-space problem: about 2.5× the throughput of the
+only other 3D FDTD solver published in Rust, most of which is these design
+choices rather than better code. [`benchmarks.md`](benchmarks.md) has the
+numbers and the caveats.
 
 ## Layout
 
