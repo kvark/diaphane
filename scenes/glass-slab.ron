@@ -1,0 +1,54 @@
+// A wave packet meeting a slab of glass head on.
+//
+// Part reflects, part transmits, and inside the glass the wavelength visibly
+// shortens by the refractive index — 1.8 here, so εr = 3.24. The reflected and
+// transmitted packets separate cleanly after a few hundred steps.
+//
+// Note the carrier is lower than in `free-flight.ron`. The resolution that
+// matters is cells per wavelength *in the highest-index material present*, and
+// inside the glass the wavelength is 1.8x shorter. Keeping 16 cells there means
+// 28.8 in vacuum. Getting this wrong is the classic way to produce a refraction
+// angle that is simply incorrect, with nothing to announce the problem.
+//
+// Try:
+//   cargo run --release -p diaphane-viz -- --scene scenes/glass-slab.ron --mode electric --warmup 200
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 96, y: 96, z: 96),
+        cell_size: 0.001,
+        courant: 0.5,
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // n = 1.8
+        Material(
+            relative_permittivity: 3.24,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        // 24 mm thick, centred 12 mm past the middle of the domain.
+        Slab(axis: X, offset: 0.012, thickness: 0.024, material: 1),
+    ],
+    sources: [
+        Source(
+            shape: Sheet(axis: X, offset: -0.0288, waist: 0.024),
+            polarization: Z,
+            waveform: GaussianPulse(
+                center_frequency: 10409460000.0,
+                duration_cycles: 2.0,
+                delay: 0.00000000038426584,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

@@ -1,0 +1,65 @@
+// Young's experiment, in three dimensions.
+//
+// A conducting screen across the domain with two slits cut through it. The
+// slits are 6 mm wide and 20 mm apart against a 12 mm wavelength, which puts
+// the first interference maximum around 37° off axis — wide enough to see
+// inside the box before the fringes run into the absorber.
+//
+// The screen is built by painting in order: a conducting slab spanning the
+// whole domain, then two vacuum blocks carved back through it. Later shapes
+// overwrite earlier ones, so a scene reads top to bottom like a stack of
+// paint, and "cut a hole" needs no special primitive.
+//
+// The slit blocks are deliberately thicker than the screen (6 mm through a
+// 3 mm plate) so they cut cleanly rather than leaving a one-cell membrane
+// behind, and they run past the domain in z so the slits are true extruded
+// apertures rather than square holes.
+//
+// Most of the energy reflects off the screen, so the transmitted field is
+// two orders of magnitude weaker than the incident one and only becomes the
+// loudest thing in the box once the reflection has been absorbed -- around
+// step 330. The auto-range follows it down; the extra gain is what pulls the
+// outer fringes clear of the background.
+//
+// Try:
+//   cargo run --release -p diaphane-viz -- --scene scenes/double-slit.ron --mode electric --warmup 330 --gain 3.5
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 96, y: 96, z: 96),
+        cell_size: 0.001,
+        courant: 0.5,
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: inf,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        Slab(axis: X, offset: 0.0, thickness: 0.003, material: 1),
+        Block(center: (0.0, 0.01, 0.0), size: (0.006, 0.006, 0.2), material: 0),
+        Block(center: (0.0, -0.01, 0.0), size: (0.006, 0.006, 0.2), material: 0),
+    ],
+    sources: [
+        Source(
+            shape: Sheet(axis: X, offset: -0.03, waist: 0.022),
+            polarization: Z,
+            waveform: GaussianPulse(
+                center_frequency: 24982705000.0,
+                duration_cycles: 3.0,
+                delay: 0.00000000024016615,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

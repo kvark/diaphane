@@ -1,0 +1,52 @@
+// A packet scattering off a perfectly conducting sphere.
+//
+// The sphere is 24 mm across against a 16 mm wavelength, so this is the
+// resonant regime where the scattered field is neither a shadow nor a simple
+// reflection: watch the wave wrap around the sphere and interfere behind it.
+//
+// A perfect conductor is not a special case in the solver. It falls out of the
+// same arithmetic as the σ → ∞ limit, where the electric update coefficient
+// becomes exactly zero, so the tangential field is pinned to zero with no
+// branch anywhere in the kernel.
+//
+// Try:
+//   cargo run --release -p diaphane-viz -- --scene scenes/metal-sphere.ron --mode electric --warmup 200
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 96, y: 96, z: 96),
+        cell_size: 0.001,
+        courant: 0.5,
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // Perfect electric conductor.
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: inf,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        Sphere(center: (0.0, 0.0, 0.0), radius: 0.012, material: 1),
+    ],
+    sources: [
+        Source(
+            shape: Sheet(axis: X, offset: -0.0288, waist: 0.028),
+            polarization: Z,
+            waveform: GaussianPulse(
+                center_frequency: 18737029000.0,
+                duration_cycles: 2.0,
+                delay: 0.00000000021348102,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

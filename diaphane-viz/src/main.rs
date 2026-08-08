@@ -33,7 +33,9 @@ USAGE:
     diaphane-viz [OPTIONS]
 
 OPTIONS:
-    --scene <photon|cavity|slab>  what to simulate           [default: photon]
+    --scene <NAME|PATH.ron>       a preset or a scene file   [default: photon]
+                                  presets: photon, cavity, slab
+    --save-scene <PATH>           write the scene out and exit
     --extent <CELLS>              cube side in cells         [default: 96]
     --resolution <CELLS/M>        rediscretize without moving anything
     --steps <N>                   solver steps per frame     [default: 8]
@@ -58,39 +60,58 @@ KEYS (windowed)
     escape         quit
 ";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SceneKind {
+/// Where the scene comes from: a built-in preset, or a file.
+#[derive(Clone, Debug, PartialEq)]
+enum SceneSource {
     Photon,
     Cavity,
     Slab,
+    File(PathBuf),
 }
 
-impl SceneKind {
-    fn build(self, extent: Extent) -> Scene {
-        match self {
-            Self::Photon => Scene::photon(extent),
-            Self::Cavity => Scene::cavity(extent),
-            Self::Slab => Scene::slab(extent, 1.8),
+impl SceneSource {
+    /// Anything that is not a preset name is taken as a path, so
+    /// `--scene scenes/double-slit.ron` needs no extra flag.
+    fn parse(argument: &str) -> Self {
+        match argument {
+            "photon" => Self::Photon,
+            "cavity" => Self::Cavity,
+            "slab" => Self::Slab,
+            path => Self::File(PathBuf::from(path)),
         }
     }
 
-    fn describe(self) -> &'static str {
-        match self {
-            Self::Photon => "a wave packet crossing free space",
-            Self::Cavity => "a dipole ringing a closed conducting box",
-            Self::Slab => "a wave packet meeting a dielectric slab",
+    fn build(&self, extent: Extent) -> Result<Scene, String> {
+        // `--extent` sizes the presets, which are defined at a millimetre per
+        // cell. A scene file carries its own domain, so the flag does not
+        // apply to it -- use `--resolution` to refine one instead.
+        Ok(match *self {
+            Self::Photon => Scene::photon(extent),
+            Self::Cavity => Scene::cavity(extent),
+            Self::Slab => Scene::slab(extent, 1.8),
+            Self::File(ref path) => Scene::load(path)?,
+        })
+    }
+
+    fn describe(&self) -> String {
+        match *self {
+            Self::Photon => "a wave packet crossing free space".to_string(),
+            Self::Cavity => "a dipole ringing a closed conducting box".to_string(),
+            Self::Slab => "a wave packet meeting a dielectric slab".to_string(),
+            Self::File(ref path) => path.display().to_string(),
         }
     }
 }
 
 struct Options {
-    scene: SceneKind,
+    scene: SceneSource,
     extent: u32,
     resolution: Option<f32>,
     steps_per_frame: u32,
     warmup: u32,
     frames: Option<u32>,
     output_dir: PathBuf,
+    save_scene: Option<PathBuf>,
     width: u32,
     height: u32,
     settings: ViewSettings,
@@ -99,13 +120,14 @@ struct Options {
 impl Options {
     fn parse() -> Result<Self, String> {
         let mut options = Self {
-            scene: SceneKind::Photon,
+            scene: SceneSource::Photon,
             extent: 96,
             resolution: None,
             steps_per_frame: 8,
             warmup: 0,
             frames: None,
             output_dir: PathBuf::from("frames"),
+            save_scene: None,
             width: 720,
             height: 540,
             settings: ViewSettings::new(),
@@ -122,14 +144,8 @@ impl Options {
                     print!("{HELP}");
                     process::exit(0);
                 }
-                "--scene" => {
-                    options.scene = match value()?.as_str() {
-                        "photon" => SceneKind::Photon,
-                        "cavity" => SceneKind::Cavity,
-                        "slab" => SceneKind::Slab,
-                        other => return Err(format!("unknown scene {other:?}")),
-                    }
-                }
+                "--scene" => options.scene = SceneSource::parse(&value()?),
+                "--save-scene" => options.save_scene = Some(PathBuf::from(value()?)),
                 "--mode" => {
                     options.settings.mode = match value()?.as_str() {
                         "energy" => ViewMode::Energy,
@@ -161,8 +177,8 @@ impl Options {
         Ok(options)
     }
 
-    fn scene(&self) -> Scene {
-        let mut scene = self.scene.build(Extent::cube(self.extent));
+    fn scene(&self) -> Result<Scene, String> {
+        let mut scene = self.scene.build(Extent::cube(self.extent))?;
         // Geometry and sources are in metres, so this rediscretizes the same
         // physical problem rather than resizing it. Running a scene at two
         // resolutions and seeing the answer stop changing is the check that
@@ -173,7 +189,7 @@ impl Options {
         if let Err(complaint) = scene.validate() {
             eprintln!("warning: {complaint}");
         }
-        scene
+        Ok(scene)
     }
 }
 
@@ -191,9 +207,10 @@ fn main() {
             process::exit(2);
         }
     };
-    let result = match options.frames {
-        Some(frames) => render_offscreen(&options, frames),
-        None => run_windowed(options),
+    let result = match (options.save_scene.clone(), options.frames) {
+        (Some(path), _) => save_scene(&options, &path),
+        (None, Some(frames)) => render_offscreen(&options, frames),
+        (None, None) => run_windowed(options),
     };
     if let Err(error) = result {
         eprintln!("error: {error}");
@@ -209,6 +226,20 @@ fn env_logger_init() {
     }
 }
 
+/// Writes the resolved scene out as RON and stops.
+///
+/// The intended way to start authoring: take a preset, dump it, edit the file.
+fn save_scene(options: &Options, path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let scene = options.scene()?;
+    scene.save(path)?;
+    println!(
+        "wrote {} ({} cells)",
+        path.display(),
+        scene.grid.extent.total()
+    );
+    Ok(())
+}
+
 /// Renders `frames` frames to PNGs without ever touching a window system.
 fn render_offscreen(options: &Options, frames: u32) -> Result<(), Box<dyn Error>> {
     let context = diaphane::gpu::headless_context()?;
@@ -217,7 +248,7 @@ fn render_offscreen(options: &Options, frames: u32) -> Result<(), Box<dyn Error>
         context.device_information().device_name.trim()
     );
 
-    let scene = options.scene();
+    let scene = options.scene()?;
     let mut simulation = Simulation::new(Arc::clone(&context), &scene);
     let mut renderer = Renderer::new(Arc::clone(&context), Capture::FORMAT);
     let mut capture = Capture::new(Arc::clone(&context), options.width, options.height);
@@ -318,7 +349,7 @@ fn run_windowed(options: Options) -> Result<(), Box<dyn Error>> {
     println!("{}", options.scene.describe());
     println!("{}", &HELP[HELP.find("KEYS").unwrap_or(0)..]);
 
-    let scene = options.scene();
+    let scene = options.scene()?;
     let mut simulation = Simulation::new(Arc::clone(&context), &scene);
     simulation.advance_by(u64::from(options.warmup));
     let encoder = context.create_command_encoder(gpu::CommandEncoderDesc {

@@ -1,0 +1,50 @@
+// A dipole ringing a closed conducting box.
+//
+// This is the scene the energy-split view exists for. Once the standing-wave
+// pattern settles, the electric and magnetic energy densities are in
+// quadrature: watch the volume pulse between orange and cyan at twice the
+// field frequency. That alternation *is* the two fields handing energy back
+// and forth, and it is invisible in a travelling wave, where the two halves
+// are equal and the packet just reads as white.
+//
+// Perfectly conducting walls, so no absorber and no loss anywhere. The energy
+// in here is conserved indefinitely — `tests/validation.rs` holds it to under
+// 1e-3 over 40,000 steps — which also makes this the one scene the solver can
+// be run *backwards* in.
+//
+// Give it a few hundred steps before looking: the Ricker wavelet is
+// broadband, and the box needs time to settle into the modes that survive.
+//
+// Try:
+//   cargo run --release -p diaphane-viz -- --scene scenes/cavity.ron --warmup 400
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 72, y: 72, z: 72),
+        cell_size: 0.001,
+        courant: 0.5,
+    ),
+    boundary: Pec,
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [],
+    sources: [
+        Source(
+            // Off-centre, so the dipole is not sitting on a node of every mode
+            // it would otherwise excite.
+            shape: Point(at: (-0.012, 0.0, 0.0)),
+            polarization: Z,
+            waveform: Ricker(
+                peak_frequency: 18737029000.0,
+                delay: 0.000000000074718357,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)
