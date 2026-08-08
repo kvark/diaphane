@@ -317,8 +317,11 @@ mod tests {
     fn pulse_scene(extent: Extent) -> Scene {
         let scene = Scene::empty(extent, 1e-3);
         let frequency = scene.grid.frequency_for_resolution(20.0);
-        let center = [extent.x / 2, extent.y / 2, extent.z / 2];
-        scene.with_source(Source::point(center, Axis::Z, Waveform::ricker(frequency)))
+        scene.with_source(Source::point(
+            [0.0; 3],
+            Axis::Z,
+            Waveform::ricker(frequency),
+        ))
     }
 
     #[test]
@@ -431,9 +434,10 @@ mod tests {
         let extent = Extent::cube(40);
         let mut scene = pulse_scene(extent);
         let metal = scene.materials.push(Material::PERFECT_CONDUCTOR);
+        // 40 cells at 1 mm spans -20..20 mm; cells 26..34 are 6..14 mm.
         scene.shapes.push(Shape::Block {
-            min: [26, 10, 10],
-            max: [34, 30, 30],
+            center: [10e-3, 0.0, 0.0],
+            size: [8e-3, 20e-3, 20e-3],
             material: metal,
         });
 

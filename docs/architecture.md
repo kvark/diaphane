@@ -103,6 +103,34 @@ array bounds leaves the outermost tangential `E` samples at zero forever, which
 is exactly a perfect electric conductor. That is what the energy-conservation
 test runs in.
 
+## Deviation 5: geometry in metres, not cells
+
+The brief does not say which, and the obvious first implementation puts shapes
+and sources at cell indices. That is a trap: a scene written in cells is welded
+to one resolution, so you cannot run it at 2x and check the answer stopped
+changing — which is the single most useful thing a saved scene enables, and the
+only routine defence against an under-resolved result that looks entirely
+convincing.
+
+So [`Shape`](../diaphane/src/scene.rs) and
+[`SourceShape`](../diaphane/src/source.rs) are in **metres, with the origin at
+the centre of the domain**. Centred rather than cornered because geometry then
+survives a change of *domain size* too — growing the box to give a wave more
+room would otherwise drag every object along with the far wall. Boxes are given
+as centre-and-size rather than min-and-max for the same reason, and because it
+is how every photonics tool states one.
+
+[`Scene::with_resolution`] rediscretizes without moving anything, which makes a
+convergence study a one-liner. The `--resolution` flag on the visualizer is the
+same thing.
+
+The failure mode this introduces is passing a cell index where metres are
+wanted — a sphere at "20" is twenty metres out and silently paints nothing. So
+`Scene::validate` rejects geometry that lies entirely outside the domain and
+sources outside it, and says so in those words.
+
+[`Scene::with_resolution`]: ../diaphane/src/scene.rs
+
 ## Deviation 4: no `egui` yet
 
 The brief's Phase 3 is an interaction layer built on egui. The visualizer here

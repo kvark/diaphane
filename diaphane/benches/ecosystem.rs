@@ -49,8 +49,11 @@ fn diaphane_scene() -> Scene {
         target_reflection: 1e-6,
     });
     let frequency = scene.grid.frequency_for_resolution(20.0);
-    let center = [extent.x / 2, extent.y / 2, extent.z / 2];
-    scene.with_source(Source::point(center, Axis::Z, Waveform::ricker(frequency)))
+    scene.with_source(Source::point(
+        [0.0; 3],
+        Axis::Z,
+        Waveform::ricker(frequency),
+    ))
 }
 
 fn oxiphoton_solver() -> Fdtd3d {

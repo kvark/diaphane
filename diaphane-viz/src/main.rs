@@ -35,6 +35,7 @@ USAGE:
 OPTIONS:
     --scene <photon|cavity|slab>  what to simulate           [default: photon]
     --extent <CELLS>              cube side in cells         [default: 96]
+    --resolution <CELLS/M>        rediscretize without moving anything
     --steps <N>                   solver steps per frame     [default: 8]
     --warmup <N>                  steps to run before the first frame [default: 0]
     --mode <energy|electric|magnetic|magnitude>              [default: energy]
@@ -85,6 +86,7 @@ impl SceneKind {
 struct Options {
     scene: SceneKind,
     extent: u32,
+    resolution: Option<f32>,
     steps_per_frame: u32,
     warmup: u32,
     frames: Option<u32>,
@@ -99,6 +101,7 @@ impl Options {
         let mut options = Self {
             scene: SceneKind::Photon,
             extent: 96,
+            resolution: None,
             steps_per_frame: 8,
             warmup: 0,
             frames: None,
@@ -137,6 +140,7 @@ impl Options {
                     }
                 }
                 "--extent" => options.extent = parse(&value()?, "--extent")?,
+                "--resolution" => options.resolution = Some(parse(&value()?, "--resolution")?),
                 "--steps" => options.steps_per_frame = parse(&value()?, "--steps")?,
                 "--warmup" => options.warmup = parse(&value()?, "--warmup")?,
                 "--frames" => options.frames = Some(parse(&value()?, "--frames")?),
@@ -158,7 +162,14 @@ impl Options {
     }
 
     fn scene(&self) -> Scene {
-        let scene = self.scene.build(Extent::cube(self.extent));
+        let mut scene = self.scene.build(Extent::cube(self.extent));
+        // Geometry and sources are in metres, so this rediscretizes the same
+        // physical problem rather than resizing it. Running a scene at two
+        // resolutions and seeing the answer stop changing is the check that
+        // catches an under-resolved result, which otherwise looks convincing.
+        if let Some(resolution) = self.resolution {
+            scene = scene.with_resolution(resolution);
+        }
         if let Err(complaint) = scene.validate() {
             eprintln!("warning: {complaint}");
         }

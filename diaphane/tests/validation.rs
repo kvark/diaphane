@@ -193,10 +193,11 @@ fn check_plane_wave(direction: [f64; 3], cells_per_wavelength: f64, permittivity
     let mut scene = Scene::empty(Extent::cube(SIDE), 1e-3).with_boundary(Boundary::Pec);
     if permittivity != 1.0 {
         let material = scene.materials.push(Material::dielectric(permittivity));
+        // Fills the whole domain: an unbounded slab thicker than the box.
         scene.shapes.push(Shape::Slab {
             axis: Axis::X,
-            start: 0,
-            end: SIDE,
+            offset: 0.0,
+            thickness: f32::INFINITY,
             material,
         });
     }
@@ -374,13 +375,22 @@ fn a_closed_conducting_box_conserves_energy() {
 /// everything else held fixed.
 fn probe_trace(length: u32, steps: u64) -> Vec<f32> {
     const TRANSVERSE: u32 = 40;
+    const CELL: f32 = 1e-3;
     const SOURCE_X: u32 = 20;
     const PROBE_X: u32 = 36;
 
-    let mut scene = Scene::empty(Extent::new(length, TRANSVERSE, TRANSVERSE), 1e-3);
+    let mut scene = Scene::empty(Extent::new(length, TRANSVERSE, TRANSVERSE), CELL);
     let frequency = scene.grid.frequency_for_resolution(20.0);
+    // Source and probe are pinned to cell indices in both domains, so the two
+    // runs stay comparable when only the far wall moves. Converting through
+    // the grid keeps that true now that positions are metres.
+    let source_position = scene.grid.to_position([
+        SOURCE_X as f32 + 0.5,
+        0.5 * TRANSVERSE as f32,
+        0.5 * TRANSVERSE as f32,
+    ]);
     scene.sources.push(Source::point(
-        [SOURCE_X, TRANSVERSE / 2, TRANSVERSE / 2],
+        source_position,
         Axis::Z,
         Waveform::ricker(frequency),
     ));
