@@ -175,9 +175,10 @@ impl Scene {
     pub fn photon(extent: Extent) -> Self {
         let cell_size = 1e-3;
         let grid = Grid::new(extent, cell_size);
-        // Twenty cells per wavelength: enough that numerical dispersion is a
-        // fraction of a percent rather than something you can see.
-        let frequency = grid.frequency_for_resolution(20.0);
+        // Sixteen cells per wavelength: numerical dispersion stays a fraction
+        // of a percent, and the packet is short enough to be an object in the
+        // box rather than filling it.
+        let frequency = grid.frequency_for_resolution(16.0);
         let waist = 0.25 * extent.y.min(extent.z) as f32;
         Self {
             grid,
@@ -189,7 +190,10 @@ impl Scene {
                 extent.x / 5,
                 waist,
                 Axis::Z,
-                Waveform::gaussian_pulse(frequency, 4.0),
+                // Two cycles. Longer and the packet is no longer a packet --
+                // at four it is eighty cells from end to end, which is most of
+                // a usable domain.
+                Waveform::gaussian_pulse(frequency, 2.0),
             )],
         }
     }
@@ -227,11 +231,12 @@ impl Scene {
             end: extent.x * 3 / 4,
             material,
         });
-        // Keep 20 cells per wavelength inside the glass too, where the
-        // wavelength is `n` times shorter.
+        // Keep the resolution inside the glass too, where the wavelength is
+        // `n` times shorter — the easiest resolution mistake to make, and one
+        // that shows up as the wrong refraction angle rather than as an error.
         for source in scene.sources.iter_mut() {
-            let frequency = scene.grid.frequency_for_resolution(20.0 * refractive_index);
-            source.waveform = Waveform::gaussian_pulse(frequency, 4.0);
+            let frequency = scene.grid.frequency_for_resolution(16.0 * refractive_index);
+            source.waveform = Waveform::gaussian_pulse(frequency, 2.0);
         }
         scene
     }
