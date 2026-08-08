@@ -90,6 +90,13 @@ impl Material {
     }
 
     /// Update coefficients for this material on the given grid.
+    ///
+    /// The gains are the *material* half only — `1/εr` and `1/μr`. The
+    /// geometric half, `c·Δt/Δ`, is per axis and per cell once the grid can be
+    /// graded, so it lives in [`Grid::electric_gains`] and
+    /// [`Grid::magnetic_gains`] and the two multiply in the kernel. On a
+    /// uniform grid the geometric factor is the Courant number everywhere,
+    /// which is exactly what used to be folded in here.
     pub fn coefficients(&self, grid: &Grid) -> Coefficients {
         // A perfect conductor is the `loss = 1` limit rather than a branch in
         // the kernel: it makes the electric update `E ← (0·E + 0·curl)/2 = 0`,
@@ -99,16 +106,16 @@ impl Material {
             return Coefficients {
                 electric_gain: 0.0,
                 electric_loss: 1.0,
-                magnetic_gain: grid.courant / self.relative_permeability,
+                magnetic_gain: 1.0 / self.relative_permeability,
                 magnetic_loss: 0.0,
             };
         }
         let half_step = 0.5 * grid.time_step();
         Coefficients {
-            electric_gain: grid.courant / self.relative_permittivity,
+            electric_gain: 1.0 / self.relative_permittivity,
             electric_loss: half_step * self.conductivity
                 / (VACUUM_PERMITTIVITY * self.relative_permittivity),
-            magnetic_gain: grid.courant / self.relative_permeability,
+            magnetic_gain: 1.0 / self.relative_permeability,
             magnetic_loss: half_step * self.magnetic_loss
                 / (VACUUM_PERMEABILITY * self.relative_permeability),
         }
@@ -237,7 +244,20 @@ mod tests {
         assert_eq!(c.magnetic_loss, 0.0);
         // The point of impedance normalization: both curls carry the same gain.
         assert_eq!(c.electric_gain, c.magnetic_gain);
-        assert_eq!(c.electric_gain, 0.5);
+        // The material half only. The geometric half is `c·Δt/Δ`, which is per
+        // axis and per cell once the grid can be graded, and on this uniform
+        // grid comes out as the Courant number everywhere.
+        assert_eq!(c.electric_gain, 1.0);
+        let grid = grid();
+        for axis in crate::Axis::ALL {
+            for gain in grid
+                .electric_gains(axis)
+                .iter()
+                .chain(&grid.magnetic_gains(axis))
+            {
+                assert!((gain - grid.courant).abs() < 1e-6, "gain {gain}");
+            }
+        }
     }
 
     #[test]

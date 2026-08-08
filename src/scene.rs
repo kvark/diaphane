@@ -155,10 +155,7 @@ impl Scene {
     /// otherwise looks entirely convincing.
     pub fn with_resolution(&self, resolution: f32) -> Self {
         Self {
-            grid: Grid {
-                courant: self.grid.courant,
-                ..Grid::for_size(self.grid.size(), resolution)
-            },
+            grid: self.grid.with_resolution(resolution),
             ..self.clone()
         }
     }

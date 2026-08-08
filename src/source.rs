@@ -244,15 +244,16 @@ impl Source {
                 origin[a] = grid.cell_containing(position)[a];
                 region[a] = 1;
 
-                // The apodization is evaluated in cells by both solvers, so the
-                // waist converts here rather than in two kernels.
-                let waist_cells = waist / grid.cell_size;
-                let center = std::array::from_fn(|axis| 0.5 * extent[axis] as f32);
+                // Both the centre and the waist stay in metres, so the taper is
+                // the same shape whatever the cells under it are doing. Stated
+                // in cells it would narrow wherever the grid was refined --
+                // which is precisely where somebody put a refinement because
+                // they cared what the field was doing.
                 Injection {
                     origin,
                     extent: region,
-                    center,
-                    inverse_waist_squared: 1.0 / (waist_cells * waist_cells),
+                    center: [0.0; 3],
+                    inverse_waist_squared: 1.0 / (waist * waist),
                     component: self.polarization.index(),
                     value,
                 }
@@ -269,9 +270,10 @@ pub struct Injection {
     pub origin: [usize; 3],
     /// Size of the affected region in cells.
     pub extent: [usize; 3],
-    /// Centre of the Gaussian apodization, in cells.
+    /// Centre of the Gaussian apodization, in metres from the domain centre.
     pub center: [f32; 3],
-    /// `1/waist²`. Zero means no apodization — every cell gets full weight.
+    /// `1/waist²` in 1/m². Zero means no apodization — every cell gets full
+    /// weight.
     pub inverse_waist_squared: f32,
     /// Index of the driven `E` component.
     pub component: usize,
@@ -286,17 +288,17 @@ impl Injection {
         self.extent[0] * self.extent[1] * self.extent[2]
     }
 
-    /// Apodization weight at an absolute cell coordinate.
-    pub fn weight(&self, coord: [usize; 3]) -> f32 {
+    /// Apodization weight at a physical position, in metres.
+    pub fn weight(&self, position: [f32; 3]) -> f32 {
         if self.inverse_waist_squared == 0.0 {
             return 1.0;
         }
         let mut radius_squared = 0.0;
-        for (axis, &position) in coord.iter().enumerate() {
+        for (axis, &coordinate) in position.iter().enumerate() {
             // Only the directions the region actually spans are apodized;
             // the sheet's own normal contributes nothing.
             if self.extent[axis] > 1 {
-                let offset = position as f32 - self.center[axis];
+                let offset = coordinate - self.center[axis];
                 radius_squared += offset * offset;
             }
         }
@@ -401,7 +403,7 @@ mod tests {
         assert_eq!(injection.cell_count(), 1);
         assert_eq!(injection.origin, [4, 5, 6]);
         assert_eq!(injection.component, 2);
-        assert_eq!(injection.weight([4, 5, 6]), 1.0);
+        assert_eq!(injection.weight([-11.5e-3, -14.5e-3, -17.5e-3]), 1.0);
     }
 
     #[test]
@@ -413,14 +415,19 @@ mod tests {
         assert_eq!(injection.origin, [8, 0, 0]);
         assert_eq!(injection.extent, [1, 40, 48]);
 
-        // Peak weight at the centre of the sheet, falling off transversely.
-        let center = [8, 20, 24];
+        // Peak weight on the axis of the sheet, falling off transversely. The
+        // taper is stated in metres, so these are metres — one waist out is
+        // `exp(-1)`.
+        let center = [-8e-3, 0.0, 0.0];
         assert!((injection.weight(center) - 1.0).abs() < 1e-6);
-        let offset = injection.weight([8, 26, 24]);
-        assert!(offset < 0.4 && offset > 0.3, "weight {offset}");
+        let offset = injection.weight([-8e-3, 6e-3, 0.0]);
+        assert!(
+            (offset - (-1.0f32).exp()).abs() < 1e-6,
+            "one waist out should be exp(-1), got {offset}"
+        );
         // The sheet normal must not participate: moving along x is outside the
         // region entirely, and would otherwise damp the whole sheet.
-        assert_eq!(injection.weight([99, 20, 24]), injection.weight(center));
+        assert_eq!(injection.weight([0.05, 0.0, 0.0]), injection.weight(center));
     }
 
     #[test]

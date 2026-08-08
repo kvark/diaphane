@@ -50,7 +50,7 @@ pub mod source;
 pub mod timeline;
 
 pub use boundary::Boundary;
-pub use grid::{Axis, Extent, Grid};
+pub use grid::{Axis, Extent, Grid, Refinement, Spacing};
 pub use material::{Material, MaterialTable};
 pub use scene::{Scene, Shape};
 pub use source::{Source, SourceShape, Waveform};

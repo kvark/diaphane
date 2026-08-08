@@ -9,11 +9,18 @@
 // Both updates are written once and run for each axis `a`, with `b = a+1` and
 // `c = a+2` cyclically:
 //
-//   H[a] -= (S/ur) * ( dE[c]/db - dE[b]/dc )    forward differences
-//   E[a] += (S/er) * ( dH[c]/db - dH[b]/dc )    backward differences
+//   H[a] -= (1/ur) * ( g_b*dE[c] - g_c*dE[b] )    forward differences
+//   E[a] += (1/er) * ( g_b*dH[c] - g_c*dH[b] )    backward differences
 //
 // Forward for H and backward for E is what lands each derivative exactly on the
 // sample it updates.
+//
+// `g` is `c*dt/delta` for the axis the difference is taken along, and it is a
+// per-cell lookup because cells need not be the same size. H differences E
+// between two corners -- one whole cell, the primary spacing -- while E
+// differences H between two centres, which spans two half cells that may
+// differ. On a uniform grid every entry is the Courant number and the two
+// coincide, which is exactly why a graded grid is what finds a mistake here.
 //
 // Storage is component-major: component `a` of a field occupies
 // `[a * cell_count, (a+1) * cell_count)`. Within a component the layout is
@@ -47,6 +54,10 @@ var<storage, read> coefficients: array<Coefficients>;
 // for x, y, z, then the half-position ones. Offsets follow from the extent, so
 // nothing extra has to travel alongside.
 var<storage, read> absorber: array<f32>;
+// Per-axis geometry in three sections of three axes each: primary gains, dual
+// gains, then cell centres in metres. Packed and documented in
+// `Grid::packed_geometry`.
+var<storage, read> geometry: array<f32>;
 var<uniform> params: Params;
 
 fn extent_of(axis: u32) -> u32 {
@@ -67,13 +78,23 @@ fn stride_of(axis: u32) -> u32 {
     return params.extent.x * params.extent.y;
 }
 
-fn absorber_sample(axis: u32, coord: u32, use_half: bool) -> f32 {
-    var base = 0u;
+// Offset of one axis inside a section whose entries are one per cell.
+fn axis_base(axis: u32) -> u32 {
     if axis == 1u {
-        base = params.extent.x;
+        return params.extent.x;
     } else if axis == 2u {
-        base = params.extent.x + params.extent.y;
+        return params.extent.x + params.extent.y;
     }
+    return 0u;
+}
+
+fn geometry_sample(axis: u32, coord: u32, section: u32) -> f32 {
+    let span = params.extent.x + params.extent.y + params.extent.z;
+    return geometry[section * span + axis_base(axis) + coord];
+}
+
+fn absorber_sample(axis: u32, coord: u32, use_half: bool) -> f32 {
+    var base = axis_base(axis);
     if use_half {
         base += params.extent.x + params.extent.y + params.extent.z;
     }
@@ -126,8 +147,10 @@ fn update_magnetic(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         let base_b = b * cells + index;
         let base_c = c * cells + index;
-        let curl = (electric[base_c + stride_of(b)] - electric[base_c])
-            - (electric[base_b + stride_of(c)] - electric[base_b]);
+        let curl = geometry_sample(b, coord[b], 0u)
+                * (electric[base_c + stride_of(b)] - electric[base_c])
+            - geometry_sample(c, coord[c], 0u)
+                * (electric[base_b + stride_of(c)] - electric[base_b]);
 
         let loss = material.magnetic_loss + magnetic_absorption(a, coord);
         let slot = a * cells + index;
@@ -157,8 +180,10 @@ fn update_electric(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         let base_b = b * cells + index;
         let base_c = c * cells + index;
-        let curl = (magnetic[base_c] - magnetic[base_c - stride_of(b)])
-            - (magnetic[base_b] - magnetic[base_b - stride_of(c)]);
+        let curl = geometry_sample(b, coord[b], 1u)
+                * (magnetic[base_c] - magnetic[base_c - stride_of(b)])
+            - geometry_sample(c, coord[c], 1u)
+                * (magnetic[base_b] - magnetic[base_b - stride_of(c)]);
 
         let loss = material.electric_loss + electric_absorption(a, coord);
         let slot = a * cells + index;
@@ -188,7 +213,9 @@ fn inject(@builtin(global_invocation_id) global_id: vec3<u32>) {
             // Only directions the region actually spans are apodized; a sheet
             // must not be damped along its own normal.
             if region[t] > 1u {
-                let offset = f32(coord[t]) - params.source_shape[t];
+                // In metres, not cells: a taper stated in cells would narrow
+                // wherever the grid was refined.
+                let offset = geometry_sample(t, coord[t], 2u) - params.source_shape[t];
                 radius_squared += offset * offset;
             }
         }

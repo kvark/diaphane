@@ -126,15 +126,255 @@ impl Extent {
     }
 }
 
-/// The discretization: how big a cell is, and how big a time step is.
+/// Cell widths along one axis.
+///
+/// Cells are boxes, not cubes: each axis carries its own list of widths, so
+/// resolution can be spent where the physics is small and saved where it is
+/// not. A uniform grid is not a special case in the solvers — it is a
+/// `Spacing` whose widths happen to be equal — so there is one code path and
+/// the graded one cannot rot from disuse.
+///
+/// # Two spacings, and confusing them is the graded off-by-half
+///
+/// | | measured between | used by |
+/// |---|---|---|
+/// | primary `Δ[i]` | corner `i` and corner `i+1` | the `H` update |
+/// | dual `Δ̃[i]` | centre `i−1` and centre `i` | the `E` update |
+///
+/// This follows from the staggering at the top of this module and nothing
+/// else. `E` sits on integer positions and `H` on half positions, so a
+/// difference of `E` spans one whole cell, while a difference of `H` spans two
+/// half cells that may be different sizes. On a uniform grid the two coincide,
+/// which is exactly why a graded grid finds the bug that a uniform one hides.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spacing {
+    primary: Vec<f32>,
+    dual: Vec<f32>,
+    /// Corner positions from the low edge; `primary.len() + 1` of them.
+    ///
+    /// In `f64`, and the corners are where a graded grid would otherwise leak
+    /// precision into places nothing else touches. A running sum of a few
+    /// hundred `f32` widths drifts by enough to land a source one cell over —
+    /// which reads as a physics bug, not an arithmetic one. These are three
+    /// short 1D arrays built once, so the wider type costs nothing that
+    /// matters.
+    corners: Vec<f64>,
+}
+
+impl Spacing {
+    /// Equal cells, which is what every scene gets until it asks otherwise.
+    pub fn uniform(count: u32, width: f32) -> Self {
+        let count = count as usize;
+        assert!(count >= 2, "an axis needs at least 2 cells, got {count}");
+        // Multiplied rather than accumulated, so a uniform axis lands on
+        // exactly the corners it would have had before there was such a thing
+        // as a `Spacing` — including the domain centre falling on a corner,
+        // which is what makes `to_position(to_cell(p)) == p` hold to the bit.
+        let corners = (0..=count).map(|i| i as f64 * f64::from(width)).collect();
+        Self::assemble(vec![width; count], corners)
+    }
+
+    /// Arbitrary cell widths, low edge first.
+    pub fn from_widths(primary: Vec<f32>) -> Self {
+        let mut corners = Vec::with_capacity(primary.len() + 1);
+        let mut offset = 0.0;
+        corners.push(offset);
+        for &width in &primary {
+            offset += f64::from(width);
+            corners.push(offset);
+        }
+        Self::assemble(primary, corners)
+    }
+
+    fn assemble(primary: Vec<f32>, corners: Vec<f64>) -> Self {
+        assert!(
+            primary.len() >= 2,
+            "an axis needs at least 2 cells, got {}",
+            primary.len()
+        );
+        assert!(
+            primary.iter().all(|&w| w > 0.0 && w.is_finite()),
+            "cell widths must be positive and finite"
+        );
+        // The dual width at `i` spans the two half cells either side of corner
+        // `i`. At `i = 0` the left half lies outside the domain; the stencil is
+        // clamped there, so the value is never read, and mirroring the first
+        // cell keeps it finite rather than leaving a trap for later.
+        let dual = (0..primary.len())
+            .map(|i| 0.5 * (primary[i.saturating_sub(1)] + primary[i]))
+            .collect();
+        Self {
+            primary,
+            dual,
+            corners,
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        self.primary.len() as u32
+    }
+
+    /// Cell widths, for the `H` update.
+    pub fn primary(&self) -> &[f32] {
+        &self.primary
+    }
+
+    /// Centre-to-centre distances, for the `E` update.
+    pub fn dual(&self) -> &[f32] {
+        &self.dual
+    }
+
+    /// Total length of the axis, in metres.
+    pub fn length(&self) -> f32 {
+        self.span() as f32
+    }
+
+    fn span(&self) -> f64 {
+        self.corners[self.corners.len() - 1]
+    }
+
+    pub fn finest(&self) -> f32 {
+        self.primary.iter().copied().fold(f32::INFINITY, f32::min)
+    }
+
+    pub fn coarsest(&self) -> f32 {
+        self.primary
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Largest ratio between neighbouring cells, which is the number that says
+    /// whether the grading is smooth enough to stay second-order accurate.
+    pub fn worst_ratio(&self) -> f32 {
+        self.primary
+            .windows(2)
+            .map(|pair| (pair[1] / pair[0]).max(pair[0] / pair[1]))
+            .fold(1.0, f32::max)
+    }
+
+    /// Position of a possibly fractional cell coordinate, measured from the
+    /// *centre* of the axis.
+    ///
+    /// Centred here rather than in the caller so that the half-length is
+    /// subtracted in `f64`, against the same corners the forward map uses. Do
+    /// it in `f32` outside and the domain centre stops landing exactly on the
+    /// corner it is, which is a fraction of a cell — right up until it is the
+    /// wrong side of one.
+    pub fn position(&self, coordinate: f32) -> f32 {
+        (self.offset_of(coordinate) - 0.5 * self.span()) as f32
+    }
+
+    /// Cell coordinate of a position measured from the centre — the inverse of
+    /// [`Self::position`], which on a graded axis is a search rather than a
+    /// division.
+    pub fn coordinate(&self, position: f32) -> f32 {
+        let offset = f64::from(position) + 0.5 * self.span();
+        // `partition_point` gives the first corner strictly past `offset`, so
+        // one less is the cell containing it.
+        let index = self
+            .corners
+            .partition_point(|&corner| corner <= offset)
+            .saturating_sub(1)
+            .min(self.primary.len() - 1);
+        (index as f64 + (offset - self.corners[index]) / f64::from(self.primary[index])) as f32
+    }
+
+    fn offset_of(&self, coordinate: f32) -> f64 {
+        let last = self.primary.len() - 1;
+        let index = (coordinate.floor().max(0.0) as usize).min(last);
+        self.corners[index] + f64::from(coordinate - index as f32) * f64::from(self.primary[index])
+    }
+}
+
+/// A request to resolve part of the domain more finely than the rest.
+///
+/// In metres, from the centre of the domain, exactly like [`crate::Shape`]: a
+/// refinement is a statement about which physics you want resolved, so it has
+/// to survive a change of base resolution or of domain size without moving,
+/// the same way geometry does.
+///
+/// Refinement is per axis and therefore a *tensor product*: asking for a fine
+/// box refines the three slabs it projects onto, all the way through the
+/// domain. That is the price of keeping the grid logically dense — and keeping
+/// it dense is what keeps the kernel a flat coalesced dispatch with no
+/// interfaces, no interpolation and no late-time instability. It is right for
+/// layered stacks, wires and boundary layers, and wasteful for one small ball
+/// in a large empty box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct Grid {
-    pub extent: Extent,
-    /// Cell size `Δ` in metres. Cells are cubic.
+pub struct Refinement {
+    pub center: [f32; 3],
+    pub size: [f32; 3],
+    /// Target cell size inside the region, in metres.
     pub cell_size: f32,
-    /// Courant number `S = c·Δt/Δ`. Must stay below [`Grid::COURANT_LIMIT`].
+}
+
+/// The discretization: how big the cells are, and how big a time step is.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(from = "GridSpec", into = "GridSpec")
+)]
+pub struct Grid {
+    /// Size of the grid in cells. Derived from the spacing when the grid is
+    /// graded, so it is not the same as the base extent that was asked for.
+    ///
+    /// Public for reading. It is kept consistent with `spacing` by the
+    /// constructors — `spacing` is private so a `Grid` cannot be assembled any
+    /// other way — and [`Grid::validate`] rechecks the pair rather than
+    /// trusting it.
+    pub extent: Extent,
+    /// Courant number `S = c·Δt/Δ_ref`. Must stay below
+    /// [`Grid::COURANT_LIMIT`].
     pub courant: f32,
+    /// The recipe, kept so the grid can be rebuilt at another resolution and
+    /// so a scene file stays something a person can read.
+    base_extent: Extent,
+    base_cell_size: f32,
+    refinements: Vec<Refinement>,
+    max_ratio: f32,
+    spacing: [Spacing; 3],
+}
+
+/// The serialized form of a [`Grid`]: the recipe, not the resolved arrays.
+///
+/// A scene file says "cells this big, and this region finer"; writing out a
+/// few hundred cell widths per axis would be unreadable, undiffable, and
+/// welded to one resolution.
+#[derive(Clone, Debug)]
+// Named `Grid` on the wire, because that is the concept a scene file is
+// stating. That the resolved grid is a different type is this module's
+// business, not the reader's -- and it keeps every scene written before
+// grading existed parsing unchanged.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(rename = "Grid")
+)]
+pub struct GridSpec {
+    /// Cells the domain would have at `cell_size`, which is what fixes its
+    /// physical size. Refinements only subdivide; they never move a wall.
+    pub extent: Extent,
+    /// The coarse cell size in metres, away from any refinement.
+    pub cell_size: f32,
+    pub courant: f32,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub refinements: Vec<Refinement>,
+    #[cfg_attr(feature = "serde", serde(default = "default_max_ratio"))]
+    pub max_ratio: f32,
+}
+
+/// Growth cap between neighbouring cells.
+///
+/// The Yee scheme's second-order accuracy rests on the centred difference
+/// being centred, which a change of spacing breaks: the local truncation error
+/// drops to first order wherever the width changes. Grading gently keeps the
+/// *global* error close to second order, and 1.15 is the usual working figure
+/// — enough to cross an order of magnitude in about sixteen cells.
+pub fn default_max_ratio() -> f32 {
+    1.15
 }
 
 impl Grid {
@@ -145,42 +385,212 @@ impl Grid {
     /// either steps stably or it explodes exponentially.
     pub const COURANT_LIMIT: f32 = 0.577_350_26;
 
-    /// A grid with the default Courant number of `0.5`, which leaves headroom
-    /// below the limit for lossy media and the absorbing layer.
+    /// A uniform grid with the default Courant number of `0.5`, which leaves
+    /// headroom below the limit for lossy media and the absorbing layer.
     pub fn new(extent: Extent, cell_size: f32) -> Self {
-        Self {
-            extent,
-            cell_size,
-            courant: 0.5,
-        }
+        Self::build(extent, cell_size, 0.5, Vec::new(), default_max_ratio())
     }
 
-    /// A grid covering `size` metres at `resolution` cells per metre.
+    /// A uniform grid covering `size` metres at `resolution` cells per metre.
     ///
     /// This is the constructor scenes are authored against: it is the one where
     /// changing the resolution leaves the physical problem alone.
     pub fn for_size(size: [f32; 3], resolution: f32) -> Self {
+        Self::new(Self::extent_for(size, resolution), 1.0 / resolution)
+    }
+
+    /// A grid covering `size` metres at `resolution` cells per metre, refined
+    /// where asked.
+    ///
+    /// The refinements only subdivide: the domain keeps the size and the walls
+    /// it would have had without them, so adding one does not move the
+    /// geometry or the absorbing layer.
+    pub fn graded(size: [f32; 3], resolution: f32, refinements: Vec<Refinement>) -> Self {
+        Self::build(
+            Self::extent_for(size, resolution),
+            1.0 / resolution,
+            0.5,
+            refinements,
+            default_max_ratio(),
+        )
+    }
+
+    fn extent_for(size: [f32; 3], resolution: f32) -> Extent {
         assert!(
             resolution > 0.0 && resolution.is_finite(),
             "resolution must be positive and finite, got {resolution}"
         );
         let cells = size.map(|metres| (metres * resolution).round().max(2.0) as u32);
-        Self::new(Extent::new(cells[0], cells[1], cells[2]), 1.0 / resolution)
+        Extent::new(cells[0], cells[1], cells[2])
     }
 
-    /// Cells per metre.
+    fn build(
+        base_extent: Extent,
+        base_cell_size: f32,
+        courant: f32,
+        refinements: Vec<Refinement>,
+        max_ratio: f32,
+    ) -> Self {
+        assert!(
+            base_cell_size > 0.0 && base_cell_size.is_finite(),
+            "cell size must be positive and finite, got {base_cell_size}"
+        );
+        assert!(
+            max_ratio > 1.0 && max_ratio.is_finite(),
+            "the growth cap must exceed 1, got {max_ratio}"
+        );
+        let base = base_extent.as_array();
+        let spacing: [Spacing; 3] = std::array::from_fn(|axis| {
+            // With nothing to refine, the answer is the grid that was asked
+            // for, cell for cell. Routing the uniform case through the marcher
+            // would perturb every existing scene by a rounding remainder for
+            // no reason at all.
+            if refinements.is_empty() {
+                Spacing::uniform(base[axis] as u32, base_cell_size)
+            } else {
+                grade(
+                    axis,
+                    base[axis] as f32 * base_cell_size,
+                    base_cell_size,
+                    &refinements,
+                    max_ratio,
+                )
+            }
+        });
+        Self {
+            extent: Extent::new(spacing[0].count(), spacing[1].count(), spacing[2].count()),
+            courant,
+            base_extent,
+            base_cell_size,
+            refinements,
+            max_ratio,
+            spacing,
+        }
+    }
+
+    /// The same domain and the same refinements, rediscretized.
+    pub fn with_resolution(&self, resolution: f32) -> Self {
+        Self::build(
+            Self::extent_for(self.size(), resolution),
+            1.0 / resolution,
+            self.courant,
+            self.refinements.clone(),
+            self.max_ratio,
+        )
+    }
+
+    /// Cell widths along one axis.
+    pub fn spacing(&self, axis: Axis) -> &Spacing {
+        &self.spacing[axis.index()]
+    }
+
+    pub fn refinements(&self) -> &[Refinement] {
+        &self.refinements
+    }
+
+    /// Whether every cell is the same cube, which is worth knowing because it
+    /// is the case the analytic tests can be written against.
+    pub fn is_uniform(&self) -> bool {
+        self.refinements.is_empty()
+    }
+
+    /// Cells per metre at the coarse spacing.
     pub fn resolution(&self) -> f32 {
-        1.0 / self.cell_size
+        1.0 / self.base_cell_size
+    }
+
+    /// The smallest and largest cell in the domain, in metres.
+    pub fn finest(&self) -> f32 {
+        Axis::ALL
+            .iter()
+            .map(|&a| self.spacing(a).finest())
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    pub fn coarsest(&self) -> f32 {
+        Axis::ALL
+            .iter()
+            .map(|&a| self.spacing(a).coarsest())
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// The cubic cell that would impose the same stability limit as this one.
+    ///
+    /// The 3D Courant condition is `c·Δt·√(Σ_a 1/Δ_a²) ≤ 1`, taking the
+    /// smallest cell on each axis. Rolling that sum into a single equivalent
+    /// cube keeps `courant` meaning what it always meant — for a cubic grid
+    /// this *is* the cell size — so the same `1/√3` limit still applies and
+    /// nothing downstream has to learn a second convention.
+    pub fn reference_cell_size(&self) -> f32 {
+        let inverse_squares: f32 = Axis::ALL
+            .iter()
+            .map(|&a| {
+                let finest = self.spacing(a).finest();
+                1.0 / (finest * finest)
+            })
+            .sum();
+        (3.0 / inverse_squares).sqrt()
     }
 
     /// Physical size of the domain in metres.
     pub fn size(&self) -> [f32; 3] {
-        self.extent.as_array().map(|n| n as f32 * self.cell_size)
+        std::array::from_fn(|axis| self.spacing[axis].length())
     }
 
-    /// Time step `Δt = S·Δ/c`, in seconds.
+    /// Time step `Δt = S·Δ_ref/c`, in seconds.
     pub fn time_step(&self) -> f32 {
-        self.courant * self.cell_size / SPEED_OF_LIGHT
+        self.courant * self.reference_cell_size() / SPEED_OF_LIGHT
+    }
+
+    /// `c·Δt/Δ` per cell along one axis — the factor the curl updates carry.
+    ///
+    /// On a uniform grid every entry is exactly `courant`, which is what the
+    /// coefficient tables used to fold in directly. The `H` update differences
+    /// `E` across a whole cell and the `E` update differences `H` across two
+    /// half cells, so they read the primary and the dual list respectively.
+    pub fn magnetic_gains(&self, axis: Axis) -> Vec<f32> {
+        self.gains(self.spacing(axis).primary())
+    }
+
+    pub fn electric_gains(&self, axis: Axis) -> Vec<f32> {
+        self.gains(self.spacing(axis).dual())
+    }
+
+    fn gains(&self, widths: &[f32]) -> Vec<f32> {
+        let travel = SPEED_OF_LIGHT * self.time_step();
+        widths.iter().map(|&width| travel / width).collect()
+    }
+
+    /// Centre of each cell along one axis, in metres from the domain centre.
+    pub fn cell_centers(&self, axis: Axis) -> Vec<f32> {
+        let spacing = self.spacing(axis);
+        (0..spacing.count())
+            .map(|index| spacing.position(index as f32 + 0.5))
+            .collect()
+    }
+
+    /// Everything per-axis a kernel needs, packed the way the shaders unpack
+    /// it: three sections of three axes each, back to back. The offsets follow
+    /// from the extent, so nothing extra has to travel alongside — the same
+    /// arrangement the absorber profile uses.
+    ///
+    /// | section | contents | read by |
+    /// |---|---|---|
+    /// | 0 | `c·Δt/Δ`, primary | the `H` update |
+    /// | 1 | `c·Δt/Δ̃`, dual | the `E` update |
+    /// | 2 | cell centre, metres | source apodization, and the renderer |
+    pub fn packed_geometry(&self) -> Vec<f32> {
+        let mut packed = Vec::new();
+        for axis in Axis::ALL {
+            packed.extend(self.magnetic_gains(axis));
+        }
+        for axis in Axis::ALL {
+            packed.extend(self.electric_gains(axis));
+        }
+        for axis in Axis::ALL {
+            packed.extend(self.cell_centers(axis));
+        }
+        packed
     }
 
     /// Cell coordinate of a physical position.
@@ -192,15 +602,19 @@ impl Grid {
     /// which is the whole point of specifying it in metres. Against a corner
     /// origin, growing the domain to give a wave more room to fly would drag
     /// every object along with the far wall.
+    /// # And it is not a scale
+    ///
+    /// On a graded axis this is the inverse of the cumulative cell width, so
+    /// it is a search rather than a division. Writing it as a division is the
+    /// mistake that puts a source in the wrong cell only in the scenes that
+    /// asked for refinement — which are the ones nobody checks by hand.
     pub fn to_cell(&self, position: [f32; 3]) -> [f32; 3] {
-        let extent = self.extent.as_array();
-        std::array::from_fn(|axis| position[axis] / self.cell_size + 0.5 * extent[axis] as f32)
+        std::array::from_fn(|axis| self.spacing[axis].coordinate(position[axis]))
     }
 
     /// Physical position of a possibly fractional cell coordinate.
     pub fn to_position(&self, cell: [f32; 3]) -> [f32; 3] {
-        let extent = self.extent.as_array();
-        std::array::from_fn(|axis| (cell[axis] - 0.5 * extent[axis] as f32) * self.cell_size)
+        std::array::from_fn(|axis| self.spacing[axis].position(cell[axis]))
     }
 
     /// Index of the cell containing a physical position, clamped to the domain.
@@ -231,13 +645,18 @@ impl Grid {
     /// index.
     ///
     /// Below about 10 the phase error is visible; 20 is the working minimum.
+    /// Cells per wavelength at `frequency` in a medium of the given refractive
+    /// index, taken at the *coarsest* cell — the question being asked is
+    /// whether the wave is resolved everywhere, and the answer is set by the
+    /// worst place, not the average one.
     pub fn cells_per_wavelength(&self, frequency: f32, refractive_index: f32) -> f32 {
-        SPEED_OF_LIGHT / (refractive_index * frequency * self.cell_size)
+        SPEED_OF_LIGHT / (refractive_index * frequency * self.coarsest())
     }
 
-    /// The frequency whose free-space wavelength spans `cells` cells.
+    /// The frequency whose free-space wavelength spans `cells` of the coarsest
+    /// cells.
     pub fn frequency_for_resolution(&self, cells: f32) -> f32 {
-        SPEED_OF_LIGHT / (cells * self.cell_size)
+        SPEED_OF_LIGHT / (cells * self.coarsest())
     }
 
     /// Panics if the configuration cannot step stably.
@@ -247,17 +666,153 @@ impl Grid {
             "grid must be at least 2 cells across on every axis, got {:?}",
             self.extent
         );
-        assert!(
-            self.cell_size > 0.0 && self.cell_size.is_finite(),
-            "cell size must be positive and finite, got {}",
-            self.cell_size
-        );
+        // The pair is maintained by the constructors rather than derived on
+        // every access, so it is worth rechecking: a grid whose spacing and
+        // extent disagree indexes past the end of an axis somewhere deep in a
+        // solver rather than failing here.
+        let extent = self.extent.as_array();
+        for axis in Axis::ALL {
+            assert_eq!(
+                self.spacing(axis).count() as usize,
+                extent[axis.index()],
+                "the {axis:?} spacing has {} cells but the extent says {}",
+                self.spacing(axis).count(),
+                extent[axis.index()],
+            );
+        }
         assert!(
             self.courant > 0.0 && self.courant <= Self::COURANT_LIMIT,
             "Courant number {} is outside (0, {}]; the scheme would diverge",
             self.courant,
             Self::COURANT_LIMIT
         );
+    }
+}
+
+/// Cell widths along one axis, fine where a refinement asks and smoothly
+/// graded back to `base` everywhere else.
+///
+/// Three steps, and the middle one is the whole idea:
+///
+/// 1. Sample the target width on a lattice: `base`, or the smallest refinement
+///    covering that point.
+/// 2. Limit how fast it may change. Between neighbouring cells the position
+///    advances by about one width, so a per-cell ratio cap of `max_ratio` is a
+///    Lipschitz bound of `max_ratio − 1` on width against distance. A forward
+///    sweep and a backward sweep make that bound hold in both directions —
+///    it is a distance transform, and two passes are exact.
+/// 3. March out cells, then scale every width by one common factor so the last
+///    corner lands exactly on the far wall. A uniform scale cannot break the
+///    bound, because it leaves every ratio alone.
+fn grade(
+    axis: usize,
+    length: f32,
+    base: f32,
+    refinements: &[Refinement],
+    max_ratio: f32,
+) -> Spacing {
+    let finest = refinements
+        .iter()
+        .map(|refinement| refinement.cell_size)
+        .fold(base, f32::min);
+    assert!(
+        finest > 0.0 && finest.is_finite(),
+        "refinement cell sizes must be positive and finite, got {finest}"
+    );
+    // Four samples across the smallest cell asked for, so the marcher never
+    // steps over a refinement narrower than it can see.
+    let samples = ((length / finest * 4.0).ceil() as usize).clamp(64, 1 << 20);
+    let step = length / samples as f32;
+
+    let mut target = vec![base; samples + 1];
+    for (index, width) in target.iter_mut().enumerate() {
+        // Refinements are centred on the domain, like all geometry.
+        let position = index as f32 * step - 0.5 * length;
+        for refinement in refinements {
+            let half = 0.5 * refinement.size[axis];
+            if (position - refinement.center[axis]).abs() <= half {
+                *width = width.min(refinement.cell_size);
+            }
+        }
+    }
+
+    let slope = (max_ratio - 1.0) * step;
+    for index in 1..target.len() {
+        target[index] = target[index].min(target[index - 1] + slope);
+    }
+    for index in (0..target.len() - 1).rev() {
+        target[index] = target[index].min(target[index + 1] + slope);
+    }
+
+    let mut widths = Vec::new();
+    let mut offset = 0.0f32;
+    while offset < length {
+        let index = ((offset / step) as usize).min(target.len() - 1);
+        widths.push(target[index]);
+        offset += target[index];
+        assert!(
+            widths.len() <= 1 << 16,
+            "grading the {axis} axis ran to {} cells; the refinements are \
+             finer than the domain can carry",
+            widths.len()
+        );
+    }
+
+    // The march reads a *sampled* profile, so quantization lets neighbours
+    // drift a little past the cap — measurably: 1.18 where 1.15 was asked for.
+    // Reapplying the bound to the cells themselves puts it where the accuracy
+    // argument actually lives, and makes `Spacing::worst_ratio` a contract
+    // rather than an observation. Both sweeps only ever shrink a cell, so the
+    // rescale below still has something to correct.
+    for index in 1..widths.len() {
+        widths[index] = widths[index].min(widths[index - 1] * max_ratio);
+    }
+    for index in (0..widths.len() - 1).rev() {
+        widths[index] = widths[index].min(widths[index + 1] * max_ratio);
+    }
+
+    // The march always ends past the far wall, by up to a whole cell. Dropping
+    // the last one may land closer than keeping it, and taking whichever is
+    // nearer halves the worst-case correction the rescale has to smear over
+    // every cell in the axis.
+    let mut total: f32 = widths.iter().sum();
+    if widths.len() > 2 {
+        let without = total - widths[widths.len() - 1];
+        if (length - without).abs() < (total - length).abs() {
+            widths.pop();
+            total = without;
+        }
+    }
+    // One common factor, so the last corner lands exactly on the far wall
+    // without disturbing a single ratio.
+    let scale = length / total;
+    for width in &mut widths {
+        *width *= scale;
+    }
+    Spacing::from_widths(widths)
+}
+
+impl From<GridSpec> for Grid {
+    fn from(spec: GridSpec) -> Self {
+        Self::build(
+            spec.extent,
+            spec.cell_size,
+            spec.courant,
+            spec.refinements,
+            spec.max_ratio,
+        )
+    }
+}
+
+impl From<Grid> for GridSpec {
+    fn from(grid: Grid) -> Self {
+        Self {
+            extent: grid.base_extent,
+            cell_size: grid.base_cell_size,
+            courant: grid.courant,
+            refinements: grid.refinements,
+            max_ratio: grid.max_ratio,
+        }
     }
 }
 
