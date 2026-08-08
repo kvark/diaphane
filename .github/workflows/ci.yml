@@ -27,6 +27,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # Blade selects its backend by target, so the Metal path is never
+      # compiled on Linux -- and it differs enough to break: a pipeline
+      # context there carries a `Drop` that holds a borrow, which turns code
+      # Vulkan accepts into an error. Cross-checking takes twenty seconds here
+      # and turns a several-minute wait on a macOS runner into part of lint.
+      - name: Install the macOS target
+        run: rustup target add aarch64-apple-darwin
+      - name: Cross-check the Metal backend
+        run: cargo clippy --workspace --all-targets --all-features
+             --target aarch64-apple-darwin -- -D warnings
+
   test:
     name: Test (with software Vulkan)
     runs-on: ubuntu-latest
