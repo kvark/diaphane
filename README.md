@@ -11,7 +11,8 @@ energy back and forth as it goes.
 Built on [`blade-graphics`](https://github.com/kvark/blade).
 
 ```
-cargo run --release -p diaphane-viz
+cargo run --release -p diaphane-viz                       # a window
+cargo run --release -p diaphane-viz --bin diaphane-render # PNGs, no display
 ```
 
 ## Scenes
@@ -52,7 +53,12 @@ independent ways to move backwards:
 | | |
 |---|---|
 | `diaphane` | the solver, headless. No windowing dependency; runs in CI. |
-| `diaphane-viz` | the visualizer: a ray-marched volume view of the live fields. |
+| `diaphane-viz` | the viewer: a window, an orbit camera, and a scrub bar. |
+| `diaphane-render` | the same view, written to PNGs. Needs no display. |
+
+The two binaries share the renderer and nothing else — one needs an event loop
+and a surface, the other needs neither, which is what lets CI run the second on
+a headless machine and the first under Xvfb.
 
 The solver comes in two implementations of the same physics. `diaphane::gpu` is
 the blade compute pipeline and is the one that has to be fast.
@@ -99,9 +105,14 @@ everywhere else. Every FDTD bug is an off-by-half.
   in a cavity — the two halves of the statement the visualizer exists to show
 
 and, when a Vulkan/Metal device is available, **CPU/GPU parity** on scenes with
-dielectrics, conductors, absorbers and overlapping sources. On a headless Linux
-box `mesa-vulkan-drivers` supplies lavapipe, which is slow but real; that is
-what CI runs against, so the GPU path is exercised rather than merely compiled.
+dielectrics, conductors, absorbers and overlapping sources.
+
+Nothing here is exercised only by compiling it. `mesa-vulkan-drivers` gives a
+headless runner a real Vulkan device via lavapipe, and Xvfb gives it a real X11
+display, so CI runs the solver, the offscreen renderer *and* the windowed
+viewer — the last with `--exit-after`, which presents a fixed number of frames
+and quits. CI also cross-checks the Metal backend from Linux, because blade
+picks its backend by target and the two differ enough to break independently.
 
 ## Benchmarks
 

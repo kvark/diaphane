@@ -1,24 +1,18 @@
-//! The visualizer.
+//! The interactive viewer: a window, an orbit camera, and a scrub bar.
 //!
-//! Runs a [`diaphane`] simulation on the GPU and draws its field buffers
-//! directly, hundreds of solver steps per displayed frame.
-//!
-//! Two modes. With no `--frames` it opens a window and runs interactively.
-//! With `--frames N` it renders offscreen to PNGs and exits, which needs no
-//! display at all — that is what CI runs, and what makes the render path
-//! something that gets exercised rather than merely compiled.
+//! Everything here needs a display. The offscreen path lives in
+//! [`crate::offscreen`] and shares the renderer but none of this.
 
-mod camera;
-mod render;
-
-use crate::render::{Capture, Renderer, ScrubBar, ViewMode, ViewSettings};
+use crate::{
+    options::{Common, TIMEOUT_MS},
+    render::{Renderer, ScrubBar, ViewMode},
+};
 use blade_graphics as gpu;
 use diaphane::{
-    Extent, Scene,
     gpu::Simulation,
     timeline::{Steppable, Timeline},
 };
-use std::{env, error::Error, path::PathBuf, process, sync::Arc, time::Instant};
+use std::{error::Error, sync::Arc, time::Instant};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -28,36 +22,12 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const TIMEOUT_MS: u32 = 120_000;
-
 /// Steps between keyframes. Bounds the worst-case scrub replay, and with a
 /// sixteen-frame ring bounds the memory: at 96³ that is 16 × 21 MB.
 const KEYFRAME_INTERVAL: u64 = 200;
 
-const HELP: &str = "\
-diaphane-viz — watch a 3D electromagnetic field evolve
-
-USAGE:
-    diaphane-viz [OPTIONS]
-
-OPTIONS:
-    --scene <NAME|PATH.ron>       a preset or a scene file   [default: photon]
-                                  presets: photon, cavity, slab
-    --save-scene <PATH>           write the scene out and exit
-    --extent <CELLS>              cube side in cells         [default: 96]
-    --resolution <CELLS/M>        rediscretize without moving anything
-    --steps <N>                   solver steps per frame     [default: 8]
-    --warmup <N>                  steps to run before the first frame [default: 0]
-    --mode <energy|electric|magnetic|magnitude>              [default: energy]
-    --gain <F>                    brightness multiplier      [default: 1.0]
-    --log <F>                     signed-log strength, 0 = linear [default: 6]
-    --frames <N>                  render N frames offscreen and exit
-    --output-dir <PATH>           where the PNGs go          [default: frames]
-    --size <WxH>                  offscreen resolution       [default: 720x540]
-    --timeline                    draw the scrub bar in offscreen frames too
-    -h, --help                    this
-
-KEYS (windowed)
+pub const KEYS: &str = "\
+KEYS
     space          pause / resume
     R              reset the fields
     left / right   solver steps per frame
@@ -76,278 +46,12 @@ start, which is slower but always available -- the state here is a pure
 function of the step number, so a replayed step is the step.
 ";
 
-/// Where the scene comes from: a built-in preset, or a file.
-#[derive(Clone, Debug, PartialEq)]
-enum SceneSource {
-    Photon,
-    Cavity,
-    Slab,
-    File(PathBuf),
-}
-
-impl SceneSource {
-    /// Anything that is not a preset name is taken as a path, so
-    /// `--scene scenes/double-slit.ron` needs no extra flag.
-    fn parse(argument: &str) -> Self {
-        match argument {
-            "photon" => Self::Photon,
-            "cavity" => Self::Cavity,
-            "slab" => Self::Slab,
-            path => Self::File(PathBuf::from(path)),
-        }
-    }
-
-    fn build(&self, extent: Extent) -> Result<Scene, String> {
-        // `--extent` sizes the presets, which are defined at a millimetre per
-        // cell. A scene file carries its own domain, so the flag does not
-        // apply to it -- use `--resolution` to refine one instead.
-        Ok(match *self {
-            Self::Photon => Scene::photon(extent),
-            Self::Cavity => Scene::cavity(extent),
-            Self::Slab => Scene::slab(extent, 1.8),
-            Self::File(ref path) => Scene::load(path)?,
-        })
-    }
-
-    fn describe(&self) -> String {
-        match *self {
-            Self::Photon => "a wave packet crossing free space".to_string(),
-            Self::Cavity => "a dipole ringing a closed conducting box".to_string(),
-            Self::Slab => "a wave packet meeting a dielectric slab".to_string(),
-            Self::File(ref path) => path.display().to_string(),
-        }
-    }
-}
-
-struct Options {
-    scene: SceneSource,
-    extent: u32,
-    resolution: Option<f32>,
-    steps_per_frame: u32,
-    warmup: u32,
-    frames: Option<u32>,
-    output_dir: PathBuf,
-    save_scene: Option<PathBuf>,
-    timeline: bool,
-    width: u32,
-    height: u32,
-    settings: ViewSettings,
-}
-
-impl Options {
-    fn parse() -> Result<Self, String> {
-        let mut options = Self {
-            scene: SceneSource::Photon,
-            extent: 96,
-            resolution: None,
-            steps_per_frame: 8,
-            warmup: 0,
-            frames: None,
-            output_dir: PathBuf::from("frames"),
-            save_scene: None,
-            timeline: false,
-            width: 720,
-            height: 540,
-            settings: ViewSettings::new(),
-        };
-        let mut arguments = env::args().skip(1);
-        while let Some(flag) = arguments.next() {
-            let mut value = || {
-                arguments
-                    .next()
-                    .ok_or_else(|| format!("{flag} needs a value"))
-            };
-            match flag.as_str() {
-                "-h" | "--help" => {
-                    print!("{HELP}");
-                    process::exit(0);
-                }
-                "--scene" => options.scene = SceneSource::parse(&value()?),
-                "--save-scene" => options.save_scene = Some(PathBuf::from(value()?)),
-                "--mode" => {
-                    options.settings.mode = match value()?.as_str() {
-                        "energy" => ViewMode::Energy,
-                        "electric" => ViewMode::Electric,
-                        "magnetic" => ViewMode::Magnetic,
-                        "magnitude" => ViewMode::Magnitude,
-                        other => return Err(format!("unknown mode {other:?}")),
-                    }
-                }
-                "--extent" => options.extent = parse(&value()?, "--extent")?,
-                "--resolution" => options.resolution = Some(parse(&value()?, "--resolution")?),
-                "--steps" => options.steps_per_frame = parse(&value()?, "--steps")?,
-                "--warmup" => options.warmup = parse(&value()?, "--warmup")?,
-                "--frames" => options.frames = Some(parse(&value()?, "--frames")?),
-                "--gain" => options.settings.gain = parse(&value()?, "--gain")?,
-                "--log" => options.settings.log_strength = parse(&value()?, "--log")?,
-                "--output-dir" => options.output_dir = PathBuf::from(value()?),
-                "--timeline" => options.timeline = true,
-                "--size" => {
-                    let text = value()?;
-                    let (width, height) = text
-                        .split_once(['x', 'X'])
-                        .ok_or_else(|| format!("--size wants WxH, got {text:?}"))?;
-                    options.width = parse(width, "--size")?;
-                    options.height = parse(height, "--size")?;
-                }
-                other => return Err(format!("unknown flag {other:?}; try --help")),
-            }
-        }
-        Ok(options)
-    }
-
-    fn scene(&self) -> Result<Scene, String> {
-        let mut scene = self.scene.build(Extent::cube(self.extent))?;
-        // Geometry and sources are in metres, so this rediscretizes the same
-        // physical problem rather than resizing it. Running a scene at two
-        // resolutions and seeing the answer stop changing is the check that
-        // catches an under-resolved result, which otherwise looks convincing.
-        if let Some(resolution) = self.resolution {
-            scene = scene.with_resolution(resolution);
-        }
-        if let Err(complaint) = scene.validate() {
-            eprintln!("warning: {complaint}");
-        }
-        Ok(scene)
-    }
-}
-
-fn parse<T: std::str::FromStr>(text: &str, flag: &str) -> Result<T, String> {
-    text.parse()
-        .map_err(|_| format!("{flag} could not read {text:?}"))
-}
-
-fn main() {
-    env_logger_init();
-    let options = match Options::parse() {
-        Ok(options) => options,
-        Err(complaint) => {
-            eprintln!("error: {complaint}");
-            process::exit(2);
-        }
-    };
-    let result = match (options.save_scene.clone(), options.frames) {
-        (Some(path), _) => save_scene(&options, &path),
-        (None, Some(frames)) => render_offscreen(&options, frames),
-        (None, None) => run_windowed(options),
-    };
-    if let Err(error) = result {
-        eprintln!("error: {error}");
-        process::exit(1);
-    }
-}
-
-fn env_logger_init() {
-    // Blade logs device selection at info level, which is worth seeing when a
-    // machine has more than one.
-    if env::var("RUST_LOG").is_err() {
-        unsafe { env::set_var("RUST_LOG", "warn") };
-    }
-}
-
-/// Writes the resolved scene out as RON and stops.
-///
-/// The intended way to start authoring: take a preset, dump it, edit the file.
-fn save_scene(options: &Options, path: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    let scene = options.scene()?;
-    scene.save(path)?;
-    println!(
-        "wrote {} ({} cells)",
-        path.display(),
-        scene.grid.extent.total()
-    );
-    Ok(())
-}
-
-/// Renders `frames` frames to PNGs without ever touching a window system.
-fn render_offscreen(options: &Options, frames: u32) -> Result<(), Box<dyn Error>> {
-    let context = diaphane::gpu::headless_context()?;
-    println!(
-        "device: {}",
-        context.device_information().device_name.trim()
-    );
-
-    let scene = options.scene()?;
-    let mut simulation = Simulation::new(Arc::clone(&context), &scene);
-    let mut renderer = Renderer::new(Arc::clone(&context), Capture::FORMAT);
-    let mut capture = Capture::new(Arc::clone(&context), options.width, options.height);
-    let mut encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
-        name: "capture",
-        buffer_count: 2,
-    });
-
-    println!(
-        "{}: {}³ cells, {} steps per frame, {} frame(s)",
-        options.scene.describe(),
-        options.extent,
-        options.steps_per_frame,
-        frames
-    );
-
-    // Fast-forward to the moment worth looking at, so a short capture does not
-    // have to start from an empty domain.
-    if options.warmup > 0 {
-        simulation.advance_by(u64::from(options.warmup));
-        simulation.wait();
-    }
-
-    let mut settings = options.settings;
-    for frame in 0..frames {
-        simulation.advance_by(u64::from(options.steps_per_frame));
-        simulation.wait();
-
-        // Offscreen frames are meant to be clean images, so the bar is opt-in.
-        // CI turns it on, which is what keeps that branch of the shader from
-        // being dead code that only ever runs on someone's desktop.
-        if options.timeline {
-            settings.scrub = Some(ScrubBar {
-                played: (frame + 1) as f32 / frames as f32,
-                window_start: 0.35,
-            });
-        }
-
-        // Offscreen has no latency budget to protect, so the auto-range is
-        // measured and consumed within the same frame. A pulse's peak can
-        // climb by orders of magnitude between frames while it is building,
-        // and a scale one frame stale would blow the exposure out completely.
-        encoder.start();
-        renderer.measure(&mut encoder, &simulation);
-        let sync_point = context.submit(&mut encoder);
-        context.wait_for(&sync_point, TIMEOUT_MS)?;
-
-        encoder.start();
-        capture.initialize(&mut encoder);
-        renderer.draw(
-            &mut encoder,
-            capture.view(),
-            capture.size(),
-            &simulation,
-            &settings,
-        );
-        capture.copy_out(&mut encoder);
-        let sync_point = context.submit(&mut encoder);
-        context.wait_for(&sync_point, TIMEOUT_MS)?;
-
-        let path = options.output_dir.join(format!("frame{frame:04}.png"));
-        capture.write_png(&path)?;
-        println!(
-            "{}  step {}  t = {:.3} ns  peak = {:.3e}",
-            path.display(),
-            simulation.step_count(),
-            simulation.time() * 1e9,
-            renderer.scale()
-        );
-    }
-
-    context.destroy_command_encoder(&mut encoder);
-    capture.destroy();
-    renderer.destroy();
-    Ok(())
-}
-
-/// Interactive state that survives across frames.
 struct App {
-    options: Options,
+    common: Common,
+    /// Present this many frames and quit, for smoke-testing under a virtual
+    /// display where nobody is there to press escape.
+    exit_after: Option<u64>,
+    presented: u64,
     context: Arc<gpu::Context>,
     window: Option<Window>,
     surface: Option<gpu::Surface>,
@@ -366,7 +70,7 @@ struct App {
     furthest: u64,
 }
 
-fn run_windowed(options: Options) -> Result<(), Box<dyn Error>> {
+pub fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
     // SAFETY: `Context::init` loads the platform driver; there is no caller
     // precondition beyond building one context.
     let context = Arc::new(unsafe {
@@ -380,12 +84,12 @@ fn run_windowed(options: Options) -> Result<(), Box<dyn Error>> {
         "device: {}",
         context.device_information().device_name.trim()
     );
-    println!("{}", options.scene.describe());
-    println!("{}", &HELP[HELP.find("KEYS").unwrap_or(0)..]);
+    println!("{}", common.scene.describe());
+    println!("{KEYS}");
 
-    let scene = options.scene()?;
+    let scene = common.scene()?;
     let mut simulation = Simulation::new(Arc::clone(&context), &scene);
-    simulation.advance_by(u64::from(options.warmup));
+    simulation.advance_by(u64::from(common.warmup));
     let encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
         name: "frame",
         buffer_count: 2,
@@ -394,7 +98,9 @@ fn run_windowed(options: Options) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        options,
+        common,
+        exit_after,
+        presented: 0,
         context,
         window: None,
         surface: None,
@@ -450,7 +156,7 @@ impl App {
         self.last_frame = Instant::now();
 
         let steps = if self.running {
-            u64::from(self.options.steps_per_frame)
+            u64::from(self.common.steps_per_frame)
         } else {
             0
         };
@@ -465,7 +171,7 @@ impl App {
         // Computed inline rather than through `self.scrub_bar()`, which would
         // need a second borrow of `self` while `surface` is held mutably.
         let furthest = self.furthest.max(1) as f32;
-        self.options.settings.scrub = Some(ScrubBar {
+        self.common.settings.scrub = Some(ScrubBar {
             played: Steppable::step_count(&self.simulation) as f32 / furthest,
             window_start: self.timeline.earliest().unwrap_or(0) as f32 / furthest,
         });
@@ -483,10 +189,11 @@ impl App {
             frame.texture_view(),
             size,
             &self.simulation,
-            &self.options.settings,
+            &self.common.settings,
         );
         self.encoder.present(frame);
         self.sync_point = Some(self.context.submit(&mut self.encoder));
+        self.presented += 1;
 
         let bandwidth =
             self.steps_per_second as f64 * self.simulation.bytes_per_step() as f64 / 1e9;
@@ -498,11 +205,11 @@ impl App {
             seconds * 1e3,
             Steppable::step_count(&self.simulation),
             self.simulation.time() * 1e9,
-            self.options.settings.mode.label(),
-            self.options.settings.gain,
+            self.common.settings.mode.label(),
+            self.common.settings.gain,
             self.timeline.keyframe_count(),
             self.timeline.bytes() as f64 / 1e6,
-            if self.options.settings.log_strength > 0.0 {
+            if self.common.settings.log_strength > 0.0 {
                 " · log"
             } else {
                 ""
@@ -545,7 +252,7 @@ impl App {
     }
 
     fn on_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
-        let settings = &mut self.options.settings;
+        let settings = &mut self.common.settings;
         match code {
             KeyCode::Escape => event_loop.exit(),
             KeyCode::Space => self.running = !self.running,
@@ -562,11 +269,10 @@ impl App {
                 };
             }
             KeyCode::ArrowLeft => {
-                self.options.steps_per_frame =
-                    self.options.steps_per_frame.saturating_sub(1).max(1);
+                self.common.steps_per_frame = self.common.steps_per_frame.saturating_sub(1).max(1);
             }
             KeyCode::ArrowRight => {
-                self.options.steps_per_frame = (self.options.steps_per_frame + 1).min(4096);
+                self.common.steps_per_frame = (self.common.steps_per_frame + 1).min(4096);
             }
             KeyCode::Minus => settings.gain = (settings.gain / 1.3).max(1e-3),
             KeyCode::Equal => settings.gain = (settings.gain * 1.3).min(1e4),
@@ -589,7 +295,7 @@ impl ApplicationHandler for App {
         }
         let attributes = Window::default_attributes()
             .with_title("diaphane")
-            .with_inner_size(PhysicalSize::new(self.options.width, self.options.height));
+            .with_inner_size(PhysicalSize::new(self.common.width, self.common.height));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => window,
             Err(error) => {
@@ -669,7 +375,7 @@ impl ApplicationHandler for App {
                     && let Some(previous) = self.cursor
                 {
                     let delta = (current.0 - previous.0, current.1 - previous.1);
-                    self.options
+                    self.common
                         .settings
                         .camera
                         .orbit(-delta.0 as f32 * 0.006, delta.1 as f32 * 0.006);
@@ -681,14 +387,28 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, lines) => lines,
                     MouseScrollDelta::PixelDelta(position) => position.y as f32 / 60.0,
                 };
-                self.options.settings.camera.zoom((-amount * 0.1).exp());
+                self.common.settings.camera.zoom((-amount * 0.1).exp());
             }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Quitting on a frame count is what makes the windowed path testable:
+        // under a virtual display there is nobody to press escape, and a
+        // viewer that only ever runs on a developer's machine is a viewer
+        // nobody notices breaking.
+        if self.exit_after.is_some_and(|limit| self.presented >= limit) {
+            println!(
+                "presented {} frames, {} solver steps, {:.0} steps/s",
+                self.presented,
+                Steppable::step_count(&self.simulation),
+                self.steps_per_second,
+            );
+            event_loop.exit();
+            return;
+        }
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
