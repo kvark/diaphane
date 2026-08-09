@@ -189,6 +189,7 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
             capture.size(),
             &simulation,
             &settings,
+            true,
         );
         capture.copy_out(&mut encoder);
         let sync_point = context.submit(&mut encoder);
