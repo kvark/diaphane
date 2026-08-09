@@ -4,16 +4,22 @@
 
 Diaphane solves Maxwell's curl equations on a 3D Yee grid and keeps the solver
 and the renderer in the same GPU memory, so the fields are something you look
-at while they evolve rather than something you post-process afterwards. Point
-it at a wave packet and you can see the electric and magnetic fields hand
-energy back and forth as it goes.
+at while they evolve rather than something you post-process afterwards.
+
+A word on what you will actually see, because the obvious claim is false: a
+travelling wave does **not** show the two fields trading energy. `E` and `H`
+are perpendicular as vectors, but they are co-located and in phase, and their
+energy densities are *equal* — that is equipartition, and there is a test
+asserting it. They travel locked together. The trade is a standing-wave
+phenomenon, where the two sit a quarter wavelength apart and 90° out of phase:
+
+```
+cargo viz                     # a packet crossing free space — sheets, locked in phase
+cargo viz --scene cavity      # a ringing box — the two fields alternating
+cargo render                  # the same views, to PNGs, no display
+```
 
 Built on [`blade-graphics`](https://github.com/kvark/blade).
-
-```
-cargo viz              # a window
-cargo render           # PNGs, no display
-```
 
 ## Scenes
 
