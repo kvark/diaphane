@@ -12,7 +12,8 @@ use std::{fs, io, mem, path::Path, sync::Arc};
 /// Which quantity the volume shows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ViewMode {
-    /// Signed `Ez` and `Hz` at once, in two hues.
+    /// Signed `E` and `H` at once, in two hues, each along the component that
+    /// carries it.
     ///
     /// The default, because it is the only view in which the two fields are
     /// separately visible. [`Self::Energy`] tints their *densities*, and in a
@@ -30,24 +31,28 @@ pub enum ViewMode {
     Magnetic,
     /// Total energy density, monochrome.
     Magnitude,
+    /// The mesh, with no field in it. Shows where the resolution went.
+    Grid,
 }
 
 impl ViewMode {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Fields,
         Self::Energy,
         Self::Electric,
         Self::Magnetic,
         Self::Magnitude,
+        Self::Grid,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Fields => "Ez and Hz",
+            Self::Fields => "E and H",
             Self::Energy => "energy split",
             Self::Electric => "Ez",
             Self::Magnetic => "Hz",
             Self::Magnitude => "total energy",
+            Self::Grid => "the grid",
         }
     }
 
@@ -58,13 +63,14 @@ impl ViewMode {
             Self::Electric => 1.0,
             Self::Magnetic => 2.0,
             Self::Magnitude => 3.0,
+            Self::Grid => 5.0,
         }
     }
 
     fn is_signed(self) -> bool {
         match self {
             Self::Electric | Self::Magnetic => true,
-            Self::Energy | Self::Magnitude => false,
+            Self::Energy | Self::Magnitude | Self::Grid => false,
             Self::Fields => true,
         }
     }
@@ -154,6 +160,8 @@ struct ViewParams {
     /// Reciprocal of the reference path length, then the scrub bar: played
     /// fraction, window start fraction, and bar height (0 hides it).
     tone: [f32; 4],
+    /// Which component of `E` and of `H` the signed views read, then padding.
+    components: [u32; 4],
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -173,6 +181,13 @@ pub struct Renderer {
     peak: gpu::Buffer,
     /// Auto-ranged peak energy density, smoothed across frames.
     scale: f32,
+    /// Component of `E` and of `H` the signed views read.
+    ///
+    /// Measured rather than assumed. A wave along x polarized in z puts its
+    /// magnetic field in y, so a fixed component pairs one real field with one
+    /// that is a hundredth of it — and which components those are is a fact
+    /// about the scene, not about the renderer.
+    components: [u32; 2],
 }
 
 impl Renderer {
@@ -207,7 +222,7 @@ impl Renderer {
         // it is four bytes, and the read is a frame behind the write.
         let peak = context.create_buffer(gpu::BufferDesc {
             name: "field peak",
-            size: mem::size_of::<u32>() as u64,
+            size: PEAK_SLOTS as u64 * mem::size_of::<u32>() as u64,
             memory: gpu::Memory::Shared,
         });
 
@@ -217,6 +232,7 @@ impl Renderer {
             measure,
             peak,
             scale: 0.0,
+            components: [2, 1],
         }
     }
 
@@ -237,9 +253,22 @@ impl Renderer {
         if !advanced {
             return;
         }
-        // SAFETY: `peak` is host-visible, four bytes long, and the submission
-        // that wrote it has completed before this runs.
-        let measured = f32::from_bits(unsafe { self.peak.data().cast::<u32>().read_unaligned() });
+        // SAFETY: `peak` is host-visible, `PEAK_SLOTS` words long, and the
+        // submission that wrote it has completed before this runs.
+        let slots: [f32; PEAK_SLOTS] = std::array::from_fn(|slot| {
+            f32::from_bits(unsafe { self.peak.data().cast::<u32>().add(slot).read_unaligned() })
+        });
+        let measured = slots[0];
+        // Whichever component carries the most field is the one worth drawing.
+        // Taken from the same reduction the exposure comes from, so it costs
+        // nothing extra and tracks a scene whose polarization is not obvious.
+        let dominant = |offset: usize| {
+            (0..3)
+                .filter(|axis| slots[offset + axis].is_finite())
+                .max_by(|a, b| slots[offset + a].total_cmp(&slots[offset + b]))
+                .unwrap_or(0) as u32
+        };
+        self.components = [dominant(1), dominant(4)];
         if !measured.is_finite() || measured <= 0.0 {
             return;
         }
@@ -292,6 +321,7 @@ impl Renderer {
                 basis.forward[2],
                 settings.mode.code(),
             ],
+            components: [self.components[0], self.components[1], 0, 0],
             tone: match settings.scrub {
                 Some(scrub) => [
                     1.0 / reference_path(box_size),
@@ -319,12 +349,17 @@ impl Renderer {
             lookup: simulation.lookup_buffer(),
             view: ViewParams {
                 extent: [extent.x, extent.y, extent.z, extent.total() as u32],
+                components: [self.components[0], self.components[1], 0, 0],
                 ..Default::default()
             },
         };
         {
             let mut pass = encoder.transfer("clear peak");
-            pass.fill_buffer(self.peak.into(), mem::size_of::<u32>() as u64, 0);
+            pass.fill_buffer(
+                self.peak.into(),
+                PEAK_SLOTS as u64 * mem::size_of::<u32>() as u64,
+                0,
+            );
         }
         let mut pass = encoder.compute("measure peak");
         let mut pipeline = pass.with(&self.measure);
@@ -389,6 +424,10 @@ impl Renderer {
         self.context.destroy_compute_pipeline(&mut self.measure);
     }
 }
+
+/// Slots in the reduction buffer: the energy peak, then `|E|` and `|H|` per
+/// component.
+const PEAK_SLOTS: usize = 7;
 
 /// Path length, in cells, over which a feature at the top of the range
 /// accumulates to full brightness.

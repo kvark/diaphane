@@ -47,7 +47,7 @@ KEYS
     space          pause / resume
     R              reset the fields
     left / right   solver steps per frame
-    1 2 3 4 5      Ez+Hz / energy split / Ez / Hz / total energy
+    1..6           E+H / energy split / E / H / total energy / the grid
     L              toggle signed-log scaling
     - / =          brightness
     [ / ]          scrub back / forward one keyframe interval
@@ -361,6 +361,7 @@ impl App {
             KeyCode::Digit3 => settings.mode = ViewMode::ALL[2],
             KeyCode::Digit4 => settings.mode = ViewMode::ALL[3],
             KeyCode::Digit5 => settings.mode = ViewMode::ALL[4],
+            KeyCode::Digit6 => settings.mode = ViewMode::ALL[5],
             _ => {}
         }
     }

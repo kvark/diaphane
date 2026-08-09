@@ -5,12 +5,18 @@
 // copies and no format conversion. That is the whole reason the solver stores
 // fields as buffers rather than as textures.
 //
-// The default view splits the energy density into its two halves and gives
-// them opposing colours. In a travelling packet they are equal and the packet
-// reads as white; in a standing wave they alternate, and the volume visibly
-// pulses between the two hues at twice the field frequency. That alternation
-// is the electric and magnetic fields handing energy back and forth, which is
-// the thing this program exists to show.
+// The default view shows signed E and signed H at once, in two hues, each
+// taken along the component that actually carries the field -- which is not
+// the same component for both. A wave along x polarized in z has its magnetic
+// field in y, so pairing Ez with Hz shows one real field and one that is a
+// hundredth of it. The host picks both indices from a reduction rather than
+// assuming, because the answer depends on the scene.
+//
+// What the two hues do *not* show is orthogonality. E and H are perpendicular
+// as vectors, but in a travelling wave they are co-located and in phase, so
+// any pair of scalars drawn from them lands on the same sheets. They separate
+// in a standing wave, where they sit a quarter wavelength apart -- so the
+// cavity, not free flight, is where the fields visibly trade energy.
 
 struct ViewParams {
     // nx, ny, nz, cell_count
@@ -29,12 +35,18 @@ struct ViewParams {
     // played fraction, keyframed-window start fraction, bar height in
     // normalized screen units (0 hides it)
     tone: vec4<f32>,
+    // component of E and of H the signed views should read, then padding
+    components: vec4<u32>,
 }
 
 const MODE_ENERGY: u32 = 0u;
 const MODE_ELECTRIC: u32 = 1u;
 const MODE_MAGNETIC: u32 = 2u;
 const MODE_MAGNITUDE: u32 = 3u;
+// The mesh itself, with no field in it: emission at every cell boundary, so
+// the lines bunch up wherever the grid is refined and the graded regions read
+// as brighter. The one view whose subject is the discretization.
+const MODE_GRID: u32 = 5u;
 // Signed Ez and Hz at once, in two hues. The default, because it is the only
 // view in which the two fields are separately visible: the energy densities of
 // a travelling wave are *equal* (that is equipartition, and there is a test for
@@ -223,12 +235,22 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
             break;
         }
         let point = origin + direction * distance;
+        let fractional = cell_of(point);
         let coord = clamp(
-            vec3<u32>(max(cell_of(point), vec3<f32>(0.0))),
+            vec3<u32>(max(fractional, vec3<f32>(0.0))),
             vec3<u32>(0u),
             view.extent.xyz - 1u,
         );
-        if signed_view {
+        if mode == MODE_GRID {
+            // Distance to the nearest cell boundary, in cells -- so a line is
+            // a fixed fraction of whatever cell it bounds, and refined regions
+            // pack more of them into the same distance. Accumulating along the
+            // ray then makes those regions brighter, which is the point: this
+            // view answers "where did the resolution go".
+            let edge = abs(fractional - round(fractional));
+            let nearest = min(min(edge.x, edge.y), edge.z);
+            glow += GRID_TINT * smoothstep(0.08, 0.0, nearest);
+        } else if signed_view {
             let value = signed_pair(coord, mode) * exposure;
             if abs(value.x) > abs(extreme.x) {
                 extreme.x = value.x;
@@ -278,6 +300,9 @@ fn overlay(field: vec3<f32>, screen: vec2<f32>) -> vec3<f32> {
     return mix(field, bar.rgb, bar.a);
 }
 
+/// Colour of a cell boundary in [`MODE_GRID`]. Dim, because a ray crosses many.
+const GRID_TINT: vec3<f32> = vec3<f32>(0.16, 0.19, 0.26);
+
 /// Emitted colour per unit length at a cell, for the additive views.
 fn emission(coord: vec3<u32>, mode: u32, exposure: f32, log_strength: f32) -> vec3<f32> {
     let pair = densities(coord) * exposure;
@@ -296,14 +321,16 @@ fn emission(coord: vec3<u32>, mode: u32, exposure: f32, log_strength: f32) -> ve
 /// `x` carries whatever the mode's primary field is; `y` is the magnetic one
 /// and is zero unless both are wanted at once.
 fn signed_pair(coord: vec3<u32>, mode: u32) -> vec2<f32> {
-    let pair = signed_component(coord, 2u);
+    let base = cell_index(coord);
+    let electric = field_at(base, view.components.x).x;
+    let magnetic = field_at(base, view.components.y).y;
     if mode == MODE_FIELDS {
-        return pair;
+        return vec2<f32>(electric, magnetic);
     }
     if mode == MODE_MAGNETIC {
-        return vec2<f32>(pair.y, 0.0);
+        return vec2<f32>(magnetic, 0.0);
     }
-    return vec2<f32>(pair.x, 0.0);
+    return vec2<f32>(electric, 0.0);
 }
 
 /// A scrub bar along the bottom edge.
@@ -372,4 +399,14 @@ fn measure_peak(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let pair = densities(global_id);
     atomicMax(&peak[0], bitcast<u32>(max(pair.x, pair.y)));
+    // Per-component peaks too, so the host can pair each field with the
+    // component that carries it instead of guessing. `atomicMax` on the bit
+    // pattern is an ordinary max for non-negative floats: IEEE-754 orders them
+    // the same way the integers do.
+    let base = cell_index(global_id);
+    for (var component = 0u; component < 3u; component += 1u) {
+        let both = abs(field_at(base, component));
+        atomicMax(&peak[1u + component], bitcast<u32>(both.x));
+        atomicMax(&peak[4u + component], bitcast<u32>(both.y));
+    }
 }
