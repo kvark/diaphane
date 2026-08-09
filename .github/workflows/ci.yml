@@ -98,9 +98,29 @@ jobs:
           grep -qE 'panel primitives' /tmp/viz.log
           ! grep -qE '0 panel primitives' /tmp/viz.log
 
+      - name: Photograph the window
+        # The count above says the panel tessellated something. It cannot say
+        # the window is not black, the panel is not off-screen, or the volume
+        # is not hidden behind it. So CI takes an actual picture and uploads
+        # it, because that is the only check with eyes -- and because assuming
+        # a headless container could not take one is what kept this untested
+        # for as long as it was.
+        run: |
+          sudo apt-get install -y --no-install-recommends x11-apps
+          python3 -m pip install --quiet --break-system-packages pillow
+          xvfb-run -a --server-args="-screen 0 900x700x24" bash -c '
+            cargo viz --scene cavity --extent 48 --steps 4 --warmup 600 \
+              --exit-after 3000 --size 880x680 >/dev/null 2>&1 &
+            viewer=$!
+            sleep 25
+            xwd -root -silent > /tmp/window.xwd
+            kill $viewer 2>/dev/null || true
+            wait 2>/dev/null || true'
+          python3 .github/scripts/xwd-to-png.py /tmp/window.xwd frames/window.png
+
       - uses: actions/upload-artifact@v4
         with:
-          name: rendered-frame
+          name: rendered-frames-and-window
           path: frames/
 
   build:
