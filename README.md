@@ -16,8 +16,19 @@ phenomenon, where the two sit a quarter wavelength apart and 90° out of phase:
 ```
 cargo viz                     # a packet crossing free space — sheets, locked in phase
 cargo viz --scene cavity      # a ringing box — the two fields alternating
-cargo render                  # the same views, to PNGs, no display
+cargo render --gif out.gif    # the same views, to a GIF or PNGs, no display
 ```
+
+![A wave packet crossing free space](docs/media/packet.gif)
+
+*Signed `Ez` warm and `Hy` cool, 80³ cells, five solver steps a frame. Made
+with `cargo render --gif`, which is the same renderer the window uses.*
+
+The window adds a control panel: transport, a scrub slider over the whole run,
+view mode, brightness, and the throughput numbers. Stepping backwards is a
+replay from the nearest keyframe rather than an inverse update — the GPU solver
+only runs forwards — so it is exact everywhere and instant inside the keyframe
+window, which the panel marks.
 
 Built on [`blade-graphics`](https://github.com/kvark/blade).
 
@@ -99,8 +110,8 @@ The visualizer is two examples, which is what makes that true:
 
 | | |
 |---|---|
-| `cargo viz` | the viewer: a window, an orbit camera, and a scrub bar. |
-| `cargo render` | the same view, written to PNGs. Needs no display. |
+| `cargo viz` | the viewer: a window, an orbit camera, and a control panel. |
+| `cargo render` | the same view, written to PNGs or a GIF. Needs no display. |
 
 They share the render pass and their command line, and nothing else — one needs
 an event loop and a surface, the other needs neither, which is what lets CI run

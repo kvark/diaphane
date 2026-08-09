@@ -2,5 +2,5 @@
 # dev-dependency and never reaches anyone depending on the solver. These spell
 # the rest so it stays one word.
 [alias]
-viz = "run --release --example viz --"
+viz = "run --release --features gui --example viz --"
 render = "run --release --example render --"
