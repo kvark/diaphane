@@ -19,7 +19,7 @@ cargo viz --scene cavity      # a ringing box — the two fields alternating
 cargo render --gif out.gif    # the same views, to a GIF or PNGs, no display
 ```
 
-![A wave packet crossing free space](docs/media/packet.gif)
+![A wave packet crossing free space](https://raw.githubusercontent.com/kvark/diaphane/main/docs/media/packet.gif)
 
 *Signed `Ez` warm and `Hy` cool, 80³ cells, five solver steps a frame. Made
 with `cargo render --gif`, which is the same renderer the window uses.*

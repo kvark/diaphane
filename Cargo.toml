@@ -8,6 +8,16 @@ license = "MIT"
 repository = "https://github.com/kvark/diaphane"
 keywords = ["electromagnetics", "fdtd", "simulation", "gpu"]
 categories = ["science", "simulation", "graphics"]
+# The published crate is the solver: the docs, the CI plumbing and above all
+# the README's animation stay out of the tarball, which they would otherwise
+# dominate -- the GIF alone is 1.5 MB. The README reaches the animation by
+# absolute URL for the same reason.
+exclude = ["/docs", "/.github"]
+
+# docs.rs builds with default features unless told otherwise, and the scene
+# I/O behind `serde` is exactly the API someone reading the docs needs to see.
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = []
@@ -20,7 +30,7 @@ serde = ["dep:ron", "dep:serde"]
 # system here, under any feature: the visualizer is an example, so `winit` and
 # `png` are dev-dependencies and cannot reach a dependency graph that includes
 # this crate. CI asserts that with `--all-features`, which is also what docs.rs
-# builds with.
+# is told to build with, in the metadata above.
 [dependencies]
 blade-graphics = "0.8"
 blade-macros = "0.3"
