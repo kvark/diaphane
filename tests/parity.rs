@@ -21,7 +21,7 @@
 //! CI runs against.
 
 use diaphane::{
-    Axis, Boundary, Extent, Material, Scene, Shape, Source, Waveform, cpu,
+    Axis, Boundary, Extent, Grid, Material, Refinement, Scene, Shape, Source, Waveform, cpu,
     gpu::{self, headless_context},
     timeline::{Steppable, Timeline},
 };
@@ -189,6 +189,48 @@ fn several_sources_at_once() {
         Waveform::gaussian_pulse(frequency, 3.0),
     ));
     assert_parity(&scene, 250, 1e-4);
+}
+
+#[test]
+fn a_graded_grid_is_graded_the_same_way_on_the_gpu() {
+    // Every test above runs on a uniform grid, where the two gain sections of
+    // the packed geometry hold the same constant in every slot -- so a swapped
+    // section index, a transposed axis base, or an off-by-one confined to
+    // those sections would pass all of them. Grading two axes by different
+    // amounts, off centre, is what makes the entries distinct enough for any
+    // of those mistakes to show up as a real disagreement.
+    let grid = Grid::graded(
+        [48e-3, 40e-3, 36e-3],
+        1e3,
+        vec![
+            Refinement::across(Axis::X, 6e-3, 8e-3, 0.25e-3),
+            Refinement::across(Axis::Y, -4e-3, 6e-3, 0.5e-3),
+        ],
+    );
+    let mut scene = Scene::on_grid(grid).with_boundary(Boundary::Absorbing {
+        thickness: 8,
+        target_reflection: 1e-6,
+    });
+    let frequency = scene.grid.frequency_for_resolution(24.0);
+    let glass = scene.materials.push(Material::refractive(1.5));
+    // Inside the x-refined band, so the fine cells carry material as well as
+    // vacuum by the time the fields are compared.
+    scene.shapes.push(Shape::Slab {
+        axis: Axis::X,
+        offset: 6e-3,
+        thickness: 2e-3,
+        material: glass,
+    });
+    // The source sits in the y-refined band two millimetres short of the
+    // x-refined one: the wave crosses both transitions, the slab, and reaches
+    // the absorber within the run.
+    let scene = scene.with_source(Source::point(
+        [0.0, -4e-3, 0.0],
+        Axis::Z,
+        Waveform::ricker(frequency),
+    ));
+    scene.validate().unwrap();
+    assert_parity(&scene, 400, 1e-4);
 }
 
 #[test]
