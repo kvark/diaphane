@@ -371,6 +371,59 @@ fn a_closed_conducting_box_conserves_energy() {
     );
 }
 
+#[test]
+fn a_conducting_box_cannot_tell_its_low_walls_from_its_high_ones() {
+    // A pulse launched from the exact centre of a cubic PEC box has no way to
+    // tell the wall at -L/2 from the wall at +L/2 -- unless the two implement
+    // different boundary conditions. They used to: the low faces froze
+    // tangential E (a true electric conductor), while the high faces froze
+    // tangential H half a cell inside the wall, which is a perfect *magnetic*
+    // conductor. Both are lossless, so the energy test above is blind to it;
+    // what gives it away is the echo, which returns sign-flipped from an
+    // electric wall and sign-preserved from a magnetic one. Mirror symmetry
+    // of the field is therefore the assertion: it survives many bounces on
+    // matched walls and is destroyed by the first bounce on mismatched ones.
+    let extent = 24usize;
+    // 24 cells put a lattice line through the exact centre, where Ez sits at
+    // integer x and y -- so a z-polarized dipole there is x- and y-mirror
+    // symmetric on the lattice, not merely in the continuum.
+    let scene = Scene::empty(Extent::cube(extent as u32), 1e-3).with_boundary(Boundary::Pec);
+    let frequency = scene.grid.frequency_for_resolution(12.0);
+    let scene = scene.with_source(Source::point(
+        [0.0; 3],
+        Axis::Z,
+        Waveform::ricker(frequency),
+    ));
+    let mut simulation = cpu::Simulation::new(&scene);
+    // c·Δt is half a cell, so the wavefront reaches a wall in about 24
+    // steps; this is several round trips off every wall.
+    simulation.advance_by(160);
+    assert!(simulation.is_finite());
+
+    let ez = simulation.electric(Axis::Z);
+    let index = |x: usize, y: usize, z: usize| (z * extent + y) * extent + x;
+    let peak = ez.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+    assert!(peak > 0.0);
+
+    let mut worst = 0.0f32;
+    for z in 0..extent {
+        for y in 0..extent {
+            // Ez on the low wall is the wall: exactly zero, forever.
+            assert_eq!(ez[index(0, y, z)], 0.0);
+            // x = i mirrors to x = N - i through the centre lattice line.
+            for x in 1..extent {
+                let asymmetry = (ez[index(x, y, z)] - ez[index(extent - x, y, z)]).abs();
+                worst = worst.max(asymmetry);
+            }
+        }
+    }
+    assert!(
+        worst < 1e-6 * peak,
+        "left/right asymmetry of {:e} of the peak: the walls differ",
+        worst / peak
+    );
+}
+
 /// Records a probe trace for a domain of the given length along x, with
 /// everything else held fixed.
 fn probe_trace(length: u32, steps: u64) -> Vec<f32> {

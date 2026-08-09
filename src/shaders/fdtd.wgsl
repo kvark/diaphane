@@ -140,17 +140,25 @@ fn update_magnetic(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var a = 0u; a < 3u; a += 1u) {
         let b = (a + 1u) % 3u;
         let c = (a + 2u) % 3u;
-        // A forward difference needs the next plane, so the far face is left
-        // alone. Those samples lie outside the physical domain.
-        if coord[b] + 1u >= extent_of(b) || coord[c] + 1u >= extent_of(c) {
-            continue;
-        }
+        // A forward difference at the far face reaches the tangential E *on*
+        // the high wall. That sample is not stored, but its value is known: a
+        // perfect electric conductor pins tangential E to zero. Reading the
+        // implicit zero is what makes the high faces the same PEC as the low
+        // ones -- skipping these planes instead would freeze tangential H
+        // half a cell inside the wall, which is a perfect *magnetic*
+        // conductor: equally lossless, quietly a different boundary.
         let base_b = b * cells + index;
         let base_c = c * cells + index;
-        let curl = geometry_sample(b, coord[b], 0u)
-                * (electric[base_c + stride_of(b)] - electric[base_c])
-            - geometry_sample(c, coord[c], 0u)
-                * (electric[base_b + stride_of(c)] - electric[base_b]);
+        var next_c = 0.0;
+        if coord[b] + 1u < extent_of(b) {
+            next_c = electric[base_c + stride_of(b)];
+        }
+        var next_b = 0.0;
+        if coord[c] + 1u < extent_of(c) {
+            next_b = electric[base_b + stride_of(c)];
+        }
+        let curl = geometry_sample(b, coord[b], 0u) * (next_c - electric[base_c])
+            - geometry_sample(c, coord[c], 0u) * (next_b - electric[base_b]);
 
         let loss = material.magnetic_loss + magnetic_absorption(a, coord);
         let slot = a * cells + index;
@@ -174,7 +182,9 @@ fn update_electric(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let c = (a + 2u) % 3u;
         // A backward difference needs the previous plane, so index 0 is never
         // written. Leaving it at zero is precisely a perfect electric
-        // conductor at the two low faces -- the PEC wall is free.
+        // conductor at the low faces -- that wall is free. The high faces are
+        // update_magnetic's job, where the wall's zero enters as the missing
+        // forward neighbour.
         if coord[b] == 0u || coord[c] == 0u {
             continue;
         }

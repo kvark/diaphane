@@ -132,6 +132,13 @@ fn a_point_dipole_in_a_perfectly_conducting_box() {
 fn a_dielectric_slab_and_a_conductor() {
     // Three distinct material indices, so the coefficient table lookup and the
     // perfect-conductor special case are both on the path.
+    //
+    // 200 steps covers every interaction -- the pulse has crossed the slab,
+    // rung the sphere and bounced off the metal by then -- while the fields
+    // are still alive. Longer runs compare absorbed remnants: by step 300 the
+    // magnetic peak is down to 2e-4 while ulp-level solver divergence keeps
+    // accumulating in the heavily-damped absorber cells, and the ratio of
+    // noise floor to dying signal crosses any fixed tolerance eventually.
     let mut scene = Scene::empty(Extent::new(44, 40, 40), 1e-3);
     let frequency = scene.grid.frequency_for_resolution(24.0);
     // 44 x 40 x 40 cells at 1 mm: the domain runs -22..22 by -20..20 mm.
@@ -160,7 +167,7 @@ fn a_dielectric_slab_and_a_conductor() {
         Waveform::ricker(frequency),
     ));
     scene.validate().unwrap();
-    assert_parity(&scene, 300, 1e-4);
+    assert_parity(&scene, 200, 1e-4);
 }
 
 #[test]
