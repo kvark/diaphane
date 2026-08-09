@@ -135,14 +135,24 @@ jobs:
           path: frames/
 
   build:
-    name: Build ${{ matrix.os }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          # The macOS runner is the one machine in this pipeline with a real
+          # GPU, so it runs the suite rather than merely building: this is
+          # where CPU/GPU parity executes on actual Metal instead of only on
+          # lavapipe and the cross-compiled clippy check.
+          - os: macos-latest
+            name: Test macos (with Metal)
+            command: cargo test --all-features --release
+          - os: windows-latest
+            name: Build windows
+            command: cargo build --all-targets --all-features
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --all-targets --all-features
+      - name: Run
+        run: ${{ matrix.command }}
