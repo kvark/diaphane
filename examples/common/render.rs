@@ -100,6 +100,10 @@ pub struct ViewSettings {
     pub gain: f32,
     /// Strength of the signed-log compression; 0 is linear.
     pub log_strength: f32,
+    /// What [`Self::toggle_log`] restores: the last nonzero strength, so a
+    /// `--log` chosen on the command line survives an off/on round trip
+    /// instead of being replaced by a hardcoded figure.
+    remembered_log: f32,
     /// The scrub bar, or `None` to hide it.
     pub scrub: Option<ScrubBar>,
 }
@@ -145,7 +149,19 @@ impl ViewSettings {
             // scaling hides completely. Much more than this and the noise
             // floor comes up with it.
             log_strength: 6.0,
+            remembered_log: 6.0,
             scrub: None,
+        }
+    }
+
+    /// Turns the signed-log compression off and back on to the strength it
+    /// had, whether that came from the default or from `--log`.
+    pub fn toggle_log(&mut self) {
+        if self.log_strength > 0.0 {
+            self.remembered_log = self.log_strength;
+            self.log_strength = 0.0;
+        } else {
+            self.log_strength = self.remembered_log;
         }
     }
 }

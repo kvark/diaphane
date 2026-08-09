@@ -81,6 +81,7 @@ USAGE:
 OPTIONS:
 {COMMON_HELP}\
     --exit-after <FRAMES>         present this many frames, then quit
+                                  (--steps 0 opens the window paused)
 
 {KEYS}
 Use `cargo render` to write PNGs instead, on a machine with no display.
@@ -155,7 +156,12 @@ struct App {
     furthest: u64,
 }
 
-fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
+fn run(mut common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
+    // `--steps 0` reads as "open it paused", so that is what it does. Taking
+    // it literally meant advancing by nothing every frame, which also left
+    // the auto-exposure at zero and the screen blown out white.
+    let start_running = common.steps_per_frame > 0;
+    common.steps_per_frame = common.steps_per_frame.max(1);
     // SAFETY: `Context::init` loads the platform driver; there is no caller
     // precondition beyond building one context.
     let context = Arc::new(unsafe {
@@ -207,7 +213,7 @@ fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
         egui_winit: None,
         gui: None,
         sync_point: None,
-        running: true,
+        running: start_running,
         dragging: false,
         cursor: None,
         last_frame: Instant::now(),
@@ -286,7 +292,6 @@ impl App {
             keyframe_megabytes: self.timeline.bytes() as f64 / 1e6,
             running: self.running,
             steps_per_frame: self.common.steps_per_frame,
-            reversible: false,
         };
 
         let raw_input = egui_winit.take_egui_input(window);
@@ -295,6 +300,15 @@ impl App {
             commands = Some(panel::draw(ui, &readout, &mut self.common.settings));
         });
         egui_winit.handle_platform_output(window, output.platform_output);
+        // A clicked widget keeps egui's keyboard focus, and focus reroutes
+        // the keyboard: Space re-presses the last button instead of pausing,
+        // and Escape needs one press to blur and another to quit. Nothing in
+        // the panel takes typed input, so focus has no job here at all.
+        self.egui_context.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
         let jobs = self
             .egui_context
             .tessellate(output.shapes, output.pixels_per_point);
@@ -415,25 +429,28 @@ impl App {
             KeyCode::Escape => event_loop.exit(),
             KeyCode::Space => self.running = !self.running,
             KeyCode::KeyR => {
+                // Pausing too, exactly like the panel's ⏮: a reset means
+                // "back to the start, look at it", and the two spellings of
+                // the same action should not disagree about what happens next.
                 self.simulation.reset();
                 self.timeline.clear();
                 self.furthest = 0;
+                self.running = false;
             }
-            KeyCode::KeyL => {
-                settings.log_strength = if settings.log_strength > 0.0 {
-                    0.0
-                } else {
-                    40.0
-                };
-            }
+            KeyCode::KeyL => settings.toggle_log(),
             KeyCode::ArrowLeft => {
-                self.common.steps_per_frame = self.common.steps_per_frame.saturating_sub(1).max(1);
+                self.common.steps_per_frame = self
+                    .common
+                    .steps_per_frame
+                    .saturating_sub(1)
+                    .max(*panel::STEPS_PER_FRAME.start());
             }
             KeyCode::ArrowRight => {
-                self.common.steps_per_frame = (self.common.steps_per_frame + 1).min(4096);
+                self.common.steps_per_frame =
+                    (self.common.steps_per_frame + 1).min(*panel::STEPS_PER_FRAME.end());
             }
-            KeyCode::Minus => settings.gain = (settings.gain / 1.3).max(1e-3),
-            KeyCode::Equal => settings.gain = (settings.gain * 1.3).min(1e4),
+            KeyCode::Minus => settings.gain = (settings.gain / 1.3).max(*panel::GAIN.start()),
+            KeyCode::Equal => settings.gain = (settings.gain * 1.3).min(*panel::GAIN.end()),
             KeyCode::BracketLeft => self.nudge(-1),
             KeyCode::BracketRight => self.nudge(1),
             KeyCode::Home => self.scrub_to(0.0),

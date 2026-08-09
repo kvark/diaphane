@@ -10,6 +10,11 @@
 
 use crate::common::render::{ViewMode, ViewSettings};
 
+/// One range for a slider and its keyboard shortcut, so neither can set a
+/// value the other would silently snap back into its own bounds.
+pub const STEPS_PER_FRAME: std::ops::RangeInclusive<u32> = 1..=4096;
+pub const GAIN: std::ops::RangeInclusive<f32> = 1e-3..=1e4;
+
 /// What the panel displays. Sampled once per frame, before any of it moves.
 pub struct Readout {
     pub step: u64,
@@ -24,7 +29,6 @@ pub struct Readout {
     pub keyframe_megabytes: f64,
     pub running: bool,
     pub steps_per_frame: u32,
-    pub reversible: bool,
 }
 
 /// What the panel asks for. Nothing here happens until the caller applies it.
@@ -73,11 +77,7 @@ fn transport(ui: &mut egui::Ui, readout: &Readout, commands: &mut Commands) {
         // interval of replay -- correct always, instant only inside the window.
         if ui
             .button("◀")
-            .on_hover_text(if readout.reversible {
-                "one step back (replays from the nearest keyframe)"
-            } else {
-                "one step back — this scene is lossy, so only replay can do it"
-            })
+            .on_hover_text("one step back — replays from the nearest keyframe")
             .clicked()
         {
             commands.step_by = -1;
@@ -94,7 +94,7 @@ fn transport(ui: &mut egui::Ui, readout: &Readout, commands: &mut Commands) {
         let mut per_frame = readout.steps_per_frame;
         if ui
             .add(
-                egui::Slider::new(&mut per_frame, 1..=256)
+                egui::Slider::new(&mut per_frame, STEPS_PER_FRAME)
                     .logarithmic(true)
                     .text("steps / frame"),
             )
@@ -143,7 +143,7 @@ fn appearance(ui: &mut egui::Ui, settings: &mut ViewSettings) {
                 }
             });
         ui.add(
-            egui::Slider::new(&mut settings.gain, 1e-2..=1e3)
+            egui::Slider::new(&mut settings.gain, GAIN)
                 .logarithmic(true)
                 .text("gain"),
         );
@@ -153,7 +153,7 @@ fn appearance(ui: &mut egui::Ui, settings: &mut ViewSettings) {
             .on_hover_text("compresses the range so a weak tail stays visible next to a peak")
             .changed()
         {
-            settings.log_strength = if log { 40.0 } else { 0.0 };
+            settings.toggle_log();
         }
     });
 }
