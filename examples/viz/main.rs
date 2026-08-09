@@ -40,7 +40,11 @@ const KEYFRAME_BUDGET: usize = 96 << 20;
 
 fn keyframe_capacity(cells: usize) -> usize {
     let bytes = cells * 6 * std::mem::size_of::<f32>();
-    (KEYFRAME_BUDGET / bytes.max(1)).clamp(2, 32)
+    // The floor is one, not two: when a single keyframe busts the budget --
+    // a 256³ domain is 400 MB a frame -- keeping a second "for the window"
+    // would double a bill that is already eight times the promise. One
+    // keyframe still means the scrub bar works; it just replays more.
+    (KEYFRAME_BUDGET / bytes.max(1)).clamp(1, 32)
 }
 
 const KEYS: &str = "\
@@ -313,10 +317,12 @@ impl App {
                 self.running = false;
             }
             let current = Steppable::step_count(&self.simulation);
+            // Stepping is not clamped to the furthest step reached: at the
+            // head of the run -- which is where a paused viewer usually is --
+            // stepping forward means advancing the solver, and clamping there
+            // made the button a no-op in its main use case.
             let target = commands.seek.or_else(|| {
-                (commands.step_by != 0).then(|| {
-                    (current as i64 + commands.step_by).clamp(0, self.furthest as i64) as u64
-                })
+                (commands.step_by != 0).then(|| current.saturating_add_signed(commands.step_by))
             });
             if let Some(target) = target
                 && target != current
@@ -326,6 +332,8 @@ impl App {
                 self.running = false;
                 self.timeline.seek(&mut self.simulation, target);
                 self.simulation.wait();
+                self.timeline.observe(&mut self.simulation);
+                self.furthest = self.furthest.max(Steppable::step_count(&self.simulation));
             }
         }
 

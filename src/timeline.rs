@@ -106,10 +106,11 @@ impl Seek {
 }
 
 impl Timeline {
-    /// Keeps `capacity` keyframes spaced `interval` steps apart.
+    /// Keeps `capacity` keyframes roughly `interval` steps apart.
     ///
     /// `interval` trades scrub latency against memory: the worst replay is
-    /// `interval` steps, and the bill is `capacity` full field states.
+    /// about `interval` steps (plus one advance batch), and the bill is
+    /// `capacity` full field states.
     pub fn new(interval: u64, capacity: usize) -> Self {
         assert!(interval > 0, "keyframe interval must be positive");
         assert!(
@@ -125,13 +126,25 @@ impl Timeline {
 
     /// Records a keyframe if one is due. Call after advancing.
     ///
+    /// Due means the step has *crossed* into a later interval than the newest
+    /// keyframe, not that it landed on an exact multiple. Steps arrive in
+    /// batches whose size need not divide the interval -- a viewer advances by
+    /// its steps-per-frame from wherever the last seek landed -- so an exact
+    /// multiple may be unreachable, and waiting for one silently records
+    /// nothing at all.
+    ///
     /// Cheap when nothing is due, which is almost always.
     pub fn observe(&mut self, simulation: &mut impl Steppable) {
         let step = simulation.step_count();
-        if !step.is_multiple_of(self.interval) {
-            return;
-        }
-        if self.keyframes.back().is_some_and(|last| last.step == step) {
+        let newest = match self.keyframes.back() {
+            // Territory already covered: replaying after a backward seek.
+            // Frames at or ahead of this step exist, and recording here would
+            // break the ordering `seek`'s backward scan relies on.
+            Some(last) if step <= last.step => return,
+            Some(last) => last.step / self.interval,
+            None => 0,
+        };
+        if step / self.interval <= newest {
             return;
         }
         if self.keyframes.len() == self.capacity {
@@ -317,6 +330,55 @@ mod tests {
         timeline.observe(&mut simulation);
         timeline.observe(&mut simulation);
         assert_eq!(timeline.keyframe_count(), 1);
+    }
+
+    #[test]
+    fn batches_that_never_land_on_a_multiple_still_record() {
+        // A viewer advances by its steps-per-frame from wherever the run
+        // started, so exact multiples of the interval can be unreachable --
+        // here every observed step is congruent to 7 or worse modulo 10.
+        let mut simulation = cpu::Simulation::new(&scene());
+        let mut timeline = Timeline::new(10, 8);
+        simulation.advance_by(7);
+        for _ in 0..20 {
+            simulation.advance_by(3);
+            timeline.observe(&mut simulation);
+        }
+        // 67 steps of history: what matters is the crossings, about one per
+        // interval, not the landings. Multiple-only recording sees two.
+        assert!(
+            timeline.keyframe_count() >= 5,
+            "only {} keyframes over 67 steps at interval 10",
+            timeline.keyframe_count()
+        );
+    }
+
+    #[test]
+    fn recording_survives_a_seek_to_an_unaligned_step() {
+        let mut simulation = cpu::Simulation::new(&scene());
+        let mut timeline = Timeline::new(10, 8);
+        for _ in 0..6 {
+            simulation.advance_by(8);
+            timeline.observe(&mut simulation);
+        }
+        // Land somewhere no batch of 8 from step 13 can turn into a multiple
+        // of 10, then keep running.
+        timeline.seek(&mut simulation, 13);
+        let before = timeline.keyframe_count();
+        for _ in 0..10 {
+            simulation.advance_by(8);
+            timeline.observe(&mut simulation);
+        }
+        assert!(
+            timeline.keyframe_count() > before,
+            "recording stopped after seeking to an unaligned step"
+        );
+        // And the deque stayed ordered: a backward seek finds a keyframe
+        // rather than falling back to a replay from the start.
+        assert!(matches!(
+            timeline.seek(&mut simulation, 90),
+            Seek::FromKeyframe { .. }
+        ));
     }
 
     #[test]
