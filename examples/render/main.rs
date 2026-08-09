@@ -152,10 +152,15 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
         buffer_count: 2,
     });
 
+    // The resolved extent, not the --extent flag: a scene file carries its
+    // own grid, and a graded one has more cells than its recipe names.
+    let extent = scene.grid.extent;
     println!(
-        "{}: {}³ cells, {} steps per frame, {} frame(s)",
+        "{}: {}×{}×{} cells, {} steps per frame, {} frame(s)",
         options.common.scene.describe(),
-        options.common.extent,
+        extent.x,
+        extent.y,
+        extent.z,
         options.common.steps_per_frame,
         frames
     );
@@ -185,7 +190,10 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
         if options.timeline {
             settings.scrub = Some(ScrubBar {
                 played: (frame + 1) as f32 / frames as f32,
-                window_start: 0.35,
+                // The offscreen renderer keeps no keyframes, so nothing is
+                // instantly reachable and none of the bar gets the window
+                // tint. It used to fabricate 0.35 to demonstrate the colour.
+                window_start: 1.0,
             });
         }
 
