@@ -33,16 +33,23 @@ pub enum ViewMode {
     Magnitude,
     /// The mesh, with no field in it. Shows where the resolution went.
     Grid,
+    /// The textbook figure: `E` and `H` plotted as ribbons in perpendicular
+    /// planes along the direction of travel.
+    ///
+    /// The only view that shows the two fields at right angles, and it has to
+    /// be a graph to do it — see the note on `MODE_RIBBONS` in the shader.
+    Ribbons,
 }
 
 impl ViewMode {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Fields,
         Self::Energy,
         Self::Electric,
         Self::Magnetic,
         Self::Magnitude,
         Self::Grid,
+        Self::Ribbons,
     ];
 
     pub fn label(self) -> &'static str {
@@ -53,6 +60,7 @@ impl ViewMode {
             Self::Magnetic => "Hz",
             Self::Magnitude => "total energy",
             Self::Grid => "the grid",
+            Self::Ribbons => "E and H as ribbons",
         }
     }
 
@@ -64,13 +72,14 @@ impl ViewMode {
             Self::Magnetic => 2.0,
             Self::Magnitude => 3.0,
             Self::Grid => 5.0,
+            Self::Ribbons => 6.0,
         }
     }
 
     fn is_signed(self) -> bool {
         match self {
             Self::Electric | Self::Magnetic => true,
-            Self::Energy | Self::Magnitude | Self::Grid => false,
+            Self::Energy | Self::Magnitude | Self::Grid | Self::Ribbons => false,
             Self::Fields => true,
         }
     }
@@ -268,7 +277,15 @@ impl Renderer {
                 .max_by(|a, b| slots[offset + a].total_cmp(&slots[offset + b]))
                 .unwrap_or(0) as u32
         };
-        self.components = [dominant(1), dominant(4)];
+        let electric = dominant(1);
+        let mut magnetic = dominant(4);
+        if magnetic == electric {
+            // Degenerate only when a field is uniformly zero, but the ribbon
+            // view derives the propagation axis as the one left over — and
+            // `3 - a - a` is not an axis.
+            magnetic = (electric + 1) % 3;
+        }
+        self.components = [electric, magnetic];
         if !measured.is_finite() || measured <= 0.0 {
             return;
         }
