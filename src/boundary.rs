@@ -2,11 +2,13 @@
 //!
 //! # Two options
 //!
-//! [`Boundary::Pec`] costs nothing and is not really a feature: clamping the
-//! stencil to the array bounds leaves the outermost tangential `E` samples at
-//! their initial zero forever, which *is* a perfect electric conductor. A closed
-//! PEC box is lossless, so it is the reference case for the energy-conservation
-//! test.
+//! [`Boundary::Pec`] costs nearly nothing and is not really a feature: the
+//! stencil leaves the low-wall tangential `E` samples at their initial zero
+//! forever, and the high-wall samples -- which are not stored at all -- enter
+//! the magnetic update as the implicit zero a conducting wall pins them to.
+//! Both faces of every axis *are* a perfect electric conductor, and a test
+//! checks a centred pulse cannot tell them apart. A closed PEC box is
+//! lossless, so it is the reference case for the energy-conservation test.
 //!
 //! [`Boundary::Absorbing`] is the default. It is a graded, impedance-matched
 //! conductive layer: both the electric and magnetic loss rates are set to the same

@@ -255,8 +255,9 @@ impl Simulation {
             let (a, b, c) = (axis.index(), axis.next().index(), axis.prev().index());
             let (stride_b, stride_c) = (strides[b], strides[c]);
             // A forward difference along `b` and `c` needs a neighbour there,
-            // so the last plane along each is left untouched. Those samples sit
-            // outside the physical domain.
+            // so the bulk sweep stops one plane short of the high wall on
+            // each. The wall passes after it finish those planes with the
+            // implicit zero a conducting wall pins tangential `E` to.
             let mut limit = extent;
             limit[b] -= 1;
             limit[c] -= 1;
@@ -298,6 +299,47 @@ impl Simulation {
                     }
                 }
             }
+
+            // The high-wall planes along `b` and `c`. The forward difference
+            // there reaches the tangential `E` *on* the wall, which is not
+            // stored -- but a perfect electric conductor holds it at zero, so
+            // the difference is known anyway. Skipping these planes instead,
+            // as this sweep once did, froze tangential `H` half a cell inside
+            // the wall: a perfect *magnetic* conductor, equally lossless and
+            // silently a different boundary on three faces than on the other
+            // three. O(N²) cells, so clarity wins over speed here.
+            let (last_b, last_c) = (extent[b] - 1, extent[c] - 1);
+            for (fixed, at, others) in [(b, last_b, extent[c]), (c, last_c, last_b)] {
+                let other = b + c - fixed;
+                for w in 0..others {
+                    for v in 0..extent[a] {
+                        let mut coord = [0; 3];
+                        coord[fixed] = at;
+                        coord[other] = w;
+                        coord[a] = v;
+                        let index = (coord[2] * extent[1] + coord[1]) * extent[0] + coord[0];
+                        let next_c = if coord[b] + 1 < extent[b] {
+                            field_c[index + stride_b]
+                        } else {
+                            0.0
+                        };
+                        let next_b = if coord[c] + 1 < extent[c] {
+                            field_b[index + stride_c]
+                        } else {
+                            0.0
+                        };
+                        let curl = gain_b[coord[b]] * (next_c - field_c[index])
+                            - gain_c[coord[c]] * (next_b - field_b[index]);
+                        let (absorb_x, absorb_row) =
+                            self.absorber.magnetic_row(axis, coord[1], coord[2]);
+                        let coefficients = self.coefficients[self.material_index[index] as usize];
+                        let loss = coefficients.magnetic_loss + absorb_row + absorb_x[coord[0]];
+                        target[index] = ((1.0 - loss) * target[index]
+                            - coefficients.magnetic_gain * curl)
+                            / (1.0 + loss);
+                    }
+                }
+            }
         }
     }
 
@@ -311,9 +353,10 @@ impl Simulation {
             let (stride_b, stride_c) = (strides[b], strides[c]);
             // A backward difference needs the previous plane, so index 0 along
             // `b` and `c` is never updated. It stays at zero, which is exactly
-            // a perfect electric conductor at the two low faces — the PEC
-            // boundary costs nothing because it is what the stencil already
-            // does.
+            // a perfect electric conductor at the low faces — that wall costs
+            // nothing because it is what the stencil already does. The high
+            // faces are the magnetic sweep's job, where the wall's zero enters
+            // as the missing forward neighbour.
             let mut start = [0; 3];
             start[b] = 1;
             start[c] = 1;
@@ -451,6 +494,42 @@ impl Simulation {
                             - gc * (field_b[index + stride_c] - field_b[index]);
                         let coefficients = self.coefficients[self.material_index[index] as usize];
                         let loss = coefficients.magnetic_loss + absorb_row + absorb;
+                        target[index] = ((1.0 + loss) * target[index]
+                            + coefficients.magnetic_gain * curl)
+                            / (1.0 - loss);
+                    }
+                }
+            }
+
+            // The same high-wall planes the forward sweep finishes, undone
+            // with the same implicit zero -- a cell only one of the two
+            // sweeps touched would not be reversed, it would be corrupted.
+            let (last_b, last_c) = (extent[b] - 1, extent[c] - 1);
+            for (fixed, at, others) in [(b, last_b, extent[c]), (c, last_c, last_b)] {
+                let other = b + c - fixed;
+                for w in 0..others {
+                    for v in 0..extent[a] {
+                        let mut coord = [0; 3];
+                        coord[fixed] = at;
+                        coord[other] = w;
+                        coord[a] = v;
+                        let index = (coord[2] * extent[1] + coord[1]) * extent[0] + coord[0];
+                        let next_c = if coord[b] + 1 < extent[b] {
+                            field_c[index + stride_b]
+                        } else {
+                            0.0
+                        };
+                        let next_b = if coord[c] + 1 < extent[c] {
+                            field_b[index + stride_c]
+                        } else {
+                            0.0
+                        };
+                        let curl = gain_b[coord[b]] * (next_c - field_c[index])
+                            - gain_c[coord[c]] * (next_b - field_b[index]);
+                        let (absorb_x, absorb_row) =
+                            self.absorber.magnetic_row(axis, coord[1], coord[2]);
+                        let coefficients = self.coefficients[self.material_index[index] as usize];
+                        let loss = coefficients.magnetic_loss + absorb_row + absorb_x[coord[0]];
                         target[index] = ((1.0 + loss) * target[index]
                             + coefficients.magnetic_gain * curl)
                             / (1.0 - loss);
