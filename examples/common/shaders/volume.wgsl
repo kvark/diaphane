@@ -47,6 +47,18 @@ const MODE_MAGNITUDE: u32 = 3u;
 // the lines bunch up wherever the grid is refined and the graded regions read
 // as brighter. The one view whose subject is the discretization.
 const MODE_GRID: u32 = 5u;
+// The textbook figure, drawn from the actual field: two ribbons in
+// perpendicular planes along the propagation axis, E out one way and H out the
+// other, each reaching as far from the axis as the field is strong there.
+//
+// This is the only view that shows E perpendicular to H, and it has to be a
+// *graph* to do it. Every other mode draws how strong the field is at a point,
+// and perpendicularity is not a property of a point -- both fields are present
+// everywhere in the beam, equal in size and in phase, so any picture of
+// magnitude shows one set of sheets whatever colours it uses. Plotting
+// amplitude along the direction each field points is what turns a direction
+// into something with a place.
+const MODE_RIBBONS: u32 = 6u;
 // Signed Ez and Hz at once, in two hues. The default, because it is the only
 // view in which the two fields are separately visible: the energy densities of
 // a travelling wave are *equal* (that is equipartition, and there is a test for
@@ -241,7 +253,9 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
             vec3<u32>(0u),
             view.extent.xyz - 1u,
         );
-        if mode == MODE_GRID {
+        if mode == MODE_RIBBONS {
+            glow += ribbons(fractional, exposure);
+        } else if mode == MODE_GRID {
             // Distance to the nearest cell boundary, in cells -- so a line is
             // a fixed fraction of whatever cell it bounds, and refined regions
             // pack more of them into the same distance. Accumulating along the
@@ -298,6 +312,52 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
 fn overlay(field: vec3<f32>, screen: vec2<f32>) -> vec3<f32> {
     let bar = scrub_bar(screen);
     return mix(field, bar.rgb, bar.a);
+}
+
+/// Emission for [`MODE_RIBBONS`] at a fractional cell coordinate.
+///
+/// `components.x` is the axis E points along and `components.y` the one H
+/// points along; the third is the direction of travel, and both ribbons are
+/// plotted against it. The fields are sampled on the centre line, so this is a
+/// graph of the axis rather than a slice of the volume -- which is the point.
+fn ribbons(cell: vec3<f32>, exposure: f32) -> vec3<f32> {
+    let extent = vec3<f32>(view.extent.xyz);
+    let middle = 0.5 * extent;
+    let e_axis = view.components.x;
+    let h_axis = view.components.y;
+    let travel = 3u - e_axis - h_axis;
+
+    var probe = vec3<u32>(u32(middle.x), u32(middle.y), u32(middle.z));
+    probe[travel] = min(u32(max(cell[travel], 0.0)), view.extent[travel] - 1u);
+    let base = cell_index(probe);
+    let electric = field_at(base, e_axis).x * exposure;
+    let magnetic = field_at(base, h_axis).y * exposure;
+
+    // Full deflection reaches a third of the way to the wall, so a saturated
+    // field stays inside the box instead of clipping against it.
+    let reach = 0.33 * extent[e_axis];
+    let thickness = 0.015 * extent[e_axis];
+    let from_e = cell[e_axis] - middle[e_axis];
+    let from_h = cell[h_axis] - middle[h_axis];
+
+    var lit = vec3<f32>(0.0);
+    // Each ribbon is thin along the *other* field's axis and filled from the
+    // centre line out to the amplitude, on the side the sign points.
+    if abs(from_h) < thickness
+        && from_e * electric > 0.0
+        && abs(from_e) < abs(electric) * reach {
+        lit += ELECTRIC_TINT;
+    }
+    if abs(from_e) < thickness
+        && from_h * magnetic > 0.0
+        && abs(from_h) < abs(magnetic) * reach {
+        lit += MAGNETIC_TINT;
+    }
+    // A faint axis so the two ribbons read as hanging off one line.
+    if abs(from_e) < thickness && abs(from_h) < thickness {
+        lit += vec3<f32>(0.10);
+    }
+    return lit;
 }
 
 /// Colour of a cell boundary in [`MODE_GRID`]. Dim, because a ray crosses many.

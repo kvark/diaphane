@@ -24,6 +24,14 @@ cargo render --gif out.gif    # the same views, to a GIF or PNGs, no display
 *Signed `Ez` warm and `Hy` cool, 80³ cells, five solver steps a frame. Made
 with `cargo render --gif`, which is the same renderer the window uses.*
 
+Those flat sheets are wavefronts, and the fields really do sit on top of each
+other there — perpendicular as vectors, but co-located and in phase, so no
+picture of *magnitude* can pull them apart. `--mode ribbons` plots them instead:
+`E` out one axis, `H` out the perpendicular one, both against the direction of
+travel. It is the textbook figure, drawn from the solver's own data, and the
+only view in which the right angle is visible — because a right angle is a fact
+about direction, and direction has to be plotted to have a place.
+
 The window adds a control panel: transport, a scrub slider over the whole run,
 view mode, brightness, and the throughput numbers. Stepping backwards is a
 replay from the nearest keyframe rather than an inverse update — the GPU solver
