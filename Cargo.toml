@@ -11,11 +11,6 @@ categories = ["science", "simulation", "graphics"]
 
 [features]
 default = []
-# Not a library feature at all -- there is nothing in `src/` behind it. It
-# exists so the `viz` example can compile its control panel while `render`,
-# which has no event loop to feed one, does not. Cargo has no per-example
-# features, so this is the spelling.
-gui = []
 # Scene files. Optional because the solver does not need to read one to run,
 # but this is library API -- `Scene` is the interchange format -- so it is a
 # feature rather than something only the examples can reach.
@@ -84,7 +79,6 @@ pattern_type_mismatch = "warn"
 [[example]]
 name = "viz"
 path = "examples/viz/main.rs"
-required-features = ["gui"]
 test = true
 
 [[example]]

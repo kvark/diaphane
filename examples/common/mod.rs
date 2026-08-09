@@ -21,8 +21,9 @@
 
 pub mod camera;
 pub mod options;
-// Only the viewer has a UI; the offscreen renderer has no event loop to feed
-// one and no display to put it on.
-#[cfg(feature = "gui")]
+// Only the viewer uses this -- the offscreen renderer has no event loop to
+// feed a UI and no display to put one on -- but it compiles into both, like
+// everything else here. egui is a dev-dependency, so it is already available
+// to every example; gating it behind a feature bought nothing but the gate.
 pub mod panel;
 pub mod render;

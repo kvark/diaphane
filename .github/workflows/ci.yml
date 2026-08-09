@@ -60,13 +60,14 @@ jobs:
       # The solver half has to stay usable without a window system, and the
       # only way that stays true is checking it. `--all-features` rather than
       # `--no-default-features` is the point: the visualizer is an example, so
-      # `winit` and `png` are dev-dependencies, and there is no feature anyone
-      # can turn on that puts a window system into a graph that depends on this
-      # crate. `--all-features` is also what docs.rs builds with.
+      # `winit`, `png` and the whole egui stack are dev-dependencies, so there
+      # is no feature anyone can turn on that puts a window system or a UI
+      # toolkit into a graph depending on this crate. `--all-features` is also
+      # what docs.rs builds with.
       - name: Check that the library is still headless
         run: |
           cargo build --no-default-features
-          ! cargo tree --all-features -e normal | grep -qE '\bwinit\b|\bpng\b'
+          ! cargo tree --all-features -e normal | grep -qE '\bwinit\b|\bpng\b|\begui\b'
 
       - name: Render an animation offscreen
         # Exercises the GIF encoder as well as the render path, since the
