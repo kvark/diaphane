@@ -125,7 +125,7 @@ pub const COMMON_HELP: &str = "\
     --resolution <CELLS/M>        rediscretize without moving anything
     --steps <N>                   solver steps per frame     [default: 8]
     --warmup <N>                  steps to run before the first frame
-    --mode <energy|electric|magnetic|magnitude>              [default: energy]
+    --mode <fields|energy|electric|magnetic|magnitude>       [default: fields]
     --gain <F>                    brightness multiplier      [default: 1.0]
     --log <F>                     signed-log strength, 0 = linear [default: 6]
     --size <WxH>                  resolution                 [default: 720x540]
@@ -148,6 +148,7 @@ impl Common {
             "--size" => (self.width, self.height) = args.size(flag)?,
             "--mode" => {
                 self.settings.mode = match args.value(flag)?.as_str() {
+                    "fields" => ViewMode::Fields,
                     "energy" => ViewMode::Energy,
                     "electric" => ViewMode::Electric,
                     "magnetic" => ViewMode::Magnetic,

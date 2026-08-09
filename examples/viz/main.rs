@@ -25,16 +25,29 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// Steps between keyframes. Bounds the worst-case scrub replay, and with a
-/// sixteen-frame ring bounds the memory: at 96³ that is 16 × 21 MB.
+/// Steps between keyframes. Bounds the worst-case scrub replay.
 const KEYFRAME_INTERVAL: u64 = 200;
+
+/// What the scrub window is allowed to cost.
+///
+/// A keyframe is 24 bytes per cell, so a fixed *count* is a memory budget that
+/// scales with the domain: sixteen of them at 96³ is 340 MB, reached over the
+/// first three thousand steps, which is indistinguishable from a leak while it
+/// is happening. Fixing the bytes instead makes a big domain get a shorter
+/// window rather than a bigger bill.
+const KEYFRAME_BUDGET: usize = 96 << 20;
+
+fn keyframe_capacity(cells: usize) -> usize {
+    let bytes = cells * 6 * std::mem::size_of::<f32>();
+    (KEYFRAME_BUDGET / bytes.max(1)).clamp(2, 32)
+}
 
 const KEYS: &str = "\
 KEYS
     space          pause / resume
     R              reset the fields
     left / right   solver steps per frame
-    1 2 3 4        energy split / Ez / Hz / total energy
+    1 2 3 4 5      Ez+Hz / energy split / Ez / Hz / total energy
     L              toggle signed-log scaling
     - / =          brightness
     [ / ]          scrub back / forward one keyframe interval
@@ -151,6 +164,13 @@ fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
         buffer_count: 2,
     });
 
+    let keyframes = keyframe_capacity(scene.grid.extent.total());
+    println!(
+        "timeline: {keyframes} keyframes of {:.0} MB, covering {} steps",
+        scene.grid.extent.total() as f64 * 24.0 / 1e6,
+        keyframes as u64 * KEYFRAME_INTERVAL,
+    );
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -163,10 +183,10 @@ fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
         renderer: None,
         simulation,
         encoder,
-        // A keyframe every `KEYFRAME_INTERVAL` steps, sixteen of them. On the
-        // GPU a keyframe is a full readback, so the interval is what keeps
-        // that off the per-frame path.
-        timeline: Timeline::new(KEYFRAME_INTERVAL, 16),
+        // On the GPU a keyframe is a full readback, so the interval is what
+        // keeps that off the per-frame path, and the budget is what keeps the
+        // window from growing without bound.
+        timeline: Timeline::new(KEYFRAME_INTERVAL, keyframes),
         sync_point: None,
         running: true,
         dragging: false,
@@ -246,6 +266,7 @@ impl App {
             size,
             &self.simulation,
             &self.common.settings,
+            steps > 0,
         );
         self.encoder.present(frame);
         self.sync_point = Some(self.context.submit(&mut self.encoder));
@@ -339,6 +360,7 @@ impl App {
             KeyCode::Digit2 => settings.mode = ViewMode::ALL[1],
             KeyCode::Digit3 => settings.mode = ViewMode::ALL[2],
             KeyCode::Digit4 => settings.mode = ViewMode::ALL[3],
+            KeyCode::Digit5 => settings.mode = ViewMode::ALL[4],
             _ => {}
         }
     }

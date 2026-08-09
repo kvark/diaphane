@@ -125,53 +125,29 @@ in [`src/grid.rs`](src/grid.rs) and referred to from everywhere else. Every FDTD
 
 ## Validation
 
-`cargo test` runs, without needing a GPU:
+`cargo test` runs 107 checks without needing a GPU, and the ones worth naming
+are the ones that could not pass by accident: an **exact discrete plane wave**
+seeded and required to propagate exactly — not a discretized continuum
+solution, a solution of the stepping scheme itself; **numerical phase velocity**
+against the analytic dispersion relation, with a negative control; **energy
+conservation** over 40,000 steps in a PEC box; **absorbing-layer reflection**
+measured at −58 dB against an oversized reference domain; and **CPU/GPU parity**
+wherever a Vulkan or Metal device exists.
 
-- **an exact discrete plane wave**, seeded and required to propagate exactly —
-  not a discretized continuum solution but a solution of the stepping scheme
-  itself, in vacuum and in dielectrics, along axes, diagonals and oblique
-  directions. Reproducing it means every convention is right at once: which
-  sample sits at which half-cell, which difference is forward, and how far
-  apart in time `E` and `H` are.
-- **numerical phase velocity** against the analytic dispersion relation. The
-  check is that the solver matches the *discrete* physics, which is not `c` and
-  provably cannot be — plus a negative control confirming the test would notice
-  if it were wrong
-- **energy conservation** in a closed PEC box over 40,000 steps
-- **absorbing-layer reflection**, measured in dB against an oversized reference
-  domain rather than eyeballed. A ten-cell layer comes in at −58 dB.
-- **energy equipartition** in a travelling packet, against the alternation seen
-  in a cavity — the two halves of the statement the visualizer exists to show
-
-and, when a Vulkan/Metal device is available, **CPU/GPU parity** on scenes with
-dielectrics, conductors, absorbers and overlapping sources.
-
-Nothing here is exercised only by compiling it. `mesa-vulkan-drivers` gives a
-headless runner a real Vulkan device via lavapipe, and Xvfb gives it a real X11
-display, so CI runs the solver, the offscreen renderer *and* the windowed
-viewer — the last with `--exit-after`, which presents a fixed number of frames
-and quits. CI also cross-checks the Metal backend from Linux, because blade
-picks its backend by target and the two differ enough to break independently.
+Nothing here is exercised only by compiling it. CI runs the solver on lavapipe,
+the offscreen renderer headless, and the windowed viewer under Xvfb, and
+cross-checks the Metal backend from Linux.
 
 ## Benchmarks
 
 FDTD is bandwidth-bound, so the unit is cell-updates per second. On the same
-48³ free-space problem, single-threaded:
-
-| | throughput |
-|---|---|
-| **diaphane** (`f32`, matched lossy layer) | **56 Mcell-steps/s** |
-| [`oxiphoton`](https://crates.io/crates/oxiphoton) (`f64`, CPML) | 20–23 Mcell-steps/s |
-
-About 2.5×, and most of it is a design choice rather than better code:
-oxiphoton carries `f64` fields and twelve full-domain CPML `ψ` arrays, which is
-roughly 6× the bytes per cell. Converting only part of a 6× traffic advantage
-into a 2.5× speed advantage means there is headroom left on our side.
-
-Those choices buy oxiphoton real things — CPML handles grazing incidence that a
-graded conductivity cannot, and `f64` matters for high-`Q` ringdown. The full
-numbers, the caveats, and what is deliberately *not* being compared are in
-[`docs/benchmarks.md`](docs/benchmarks.md).
+48³ free-space problem, single-threaded, diaphane runs at about **2.5×**
+[`oxiphoton`](https://crates.io/crates/oxiphoton) — and most of that is a design
+choice (`f32` and a matched lossy layer against `f64` and CPML, roughly 6× the
+bytes per cell) rather than better code. Converting only part of a 6× traffic
+advantage into 2.5× of speed means there is headroom left on our side.
+[`docs/benchmarks.md`](docs/benchmarks.md) has the numbers and what is
+deliberately not being compared.
 
 ```
 cargo bench
@@ -184,7 +160,3 @@ cargo bench
   departs from that brief and why
 - [`docs/benchmarks.md`](docs/benchmarks.md) — measured throughput, and what the
   comparison does and does not mean
-
-## License
-
-MIT

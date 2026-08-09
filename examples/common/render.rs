@@ -12,9 +12,17 @@ use std::{fs, io, mem, path::Path, sync::Arc};
 /// Which quantity the volume shows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ViewMode {
-    /// Electric and magnetic energy density in opposing hues. The default,
-    /// because it is the view in which the two fields visibly trade energy.
+    /// Signed `Ez` and `Hz` at once, in two hues.
+    ///
+    /// The default, because it is the only view in which the two fields are
+    /// separately visible. [`Self::Energy`] tints their *densities*, and in a
+    /// travelling wave those are equal — so the tints sum to white and the
+    /// packet reads as a colourless blob. The energy split is the right view
+    /// for a cavity, where the two genuinely alternate.
     #[default]
+    Fields,
+    /// Electric and magnetic energy density in opposing hues, which is where
+    /// a standing wave visibly trades energy between them.
     Energy,
     /// Signed `Ez` through a diverging colormap.
     Electric,
@@ -25,7 +33,8 @@ pub enum ViewMode {
 }
 
 impl ViewMode {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::Fields,
         Self::Energy,
         Self::Electric,
         Self::Magnetic,
@@ -34,6 +43,7 @@ impl ViewMode {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Fields => "Ez and Hz",
             Self::Energy => "energy split",
             Self::Electric => "Ez",
             Self::Magnetic => "Hz",
@@ -43,6 +53,7 @@ impl ViewMode {
 
     fn code(self) -> f32 {
         match self {
+            Self::Fields => 4.0,
             Self::Energy => 0.0,
             Self::Electric => 1.0,
             Self::Magnetic => 2.0,
@@ -54,6 +65,7 @@ impl ViewMode {
         match self {
             Self::Electric | Self::Magnetic => true,
             Self::Energy | Self::Magnitude => false,
+            Self::Fields => true,
         }
     }
 }
@@ -214,7 +226,17 @@ impl Renderer {
     /// Rises quickly and falls slowly. Without that asymmetry the display
     /// flickers as a pulse's amplitude swings: every dip in the peak would be
     /// answered by an immediate brightening.
-    fn update_scale(&mut self) {
+    /// `advanced` is false when the solver did not step, and then the range is
+    /// left alone.
+    ///
+    /// Otherwise a paused viewer keeps changing: the smoothing converges toward
+    /// the measured peak over roughly a hundred frames, so the image goes on
+    /// "developing" with the field frozen. That reads as the simulation still
+    /// running, which is the one thing a pause has to rule out.
+    fn update_scale(&mut self, advanced: bool) {
+        if !advanced {
+            return;
+        }
         // SAFETY: `peak` is host-visible, four bytes long, and the submission
         // that wrote it has completed before this runs.
         let measured = f32::from_bits(unsafe { self.peak.data().cast::<u32>().read_unaligned() });
@@ -322,8 +344,9 @@ impl Renderer {
         size: gpu::Extent,
         simulation: &Simulation,
         settings: &ViewSettings,
+        advanced: bool,
     ) {
-        self.update_scale();
+        self.update_scale(advanced);
         self.measure(encoder, simulation);
 
         // One sample per cell along the ray is enough at the resolutions the

@@ -35,6 +35,14 @@ const MODE_ENERGY: u32 = 0u;
 const MODE_ELECTRIC: u32 = 1u;
 const MODE_MAGNETIC: u32 = 2u;
 const MODE_MAGNITUDE: u32 = 3u;
+// Signed Ez and Hz at once, in two hues. The default, because it is the only
+// view in which the two fields are separately visible: the energy densities of
+// a travelling wave are *equal* (that is equipartition, and there is a test for
+// it), so tinting them warm and cool sums to white and shows a colourless blob.
+// The signed components still swing through zero as the packet passes, so this
+// shows wavefronts -- and shows them locked in phase, which is what a
+// travelling wave does. Run the cavity to see the two actually alternate.
+const MODE_FIELDS: u32 = 4u;
 
 // Warm for electric, cool for magnetic. Distinct in hue and close in
 // luminance, so neither reads as "more important" than the other.
@@ -194,7 +202,7 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
     let exposure = view.right.w;
     let log_strength = view.up.w;
     let mode = u32(view.forward.w);
-    let signed_view = mode == MODE_ELECTRIC || mode == MODE_MAGNETIC;
+    let signed_view = mode == MODE_ELECTRIC || mode == MODE_MAGNETIC || mode == MODE_FIELDS;
 
     // Energy densities are non-negative, so integrating them along the ray is
     // a physically meaningful line integral and the volume glows.
@@ -205,7 +213,9 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
     // extreme sample along the ray instead of the sum, which is a maximum
     // intensity projection and keeps the wavefronts crisp.
     var glow = vec3<f32>(0.0);
-    var extreme = 0.0;
+    // Two extremes, so `MODE_FIELDS` can keep E and H apart; the single-field
+    // views leave the second at zero.
+    var extreme = vec2<f32>(0.0);
     var distance = enter + 0.5 * march;
     // Bounded so a grazing ray through a large domain cannot stall the frame.
     for (var taken = 0u; taken < 4096u; taken += 1u) {
@@ -219,9 +229,12 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
             view.extent.xyz - 1u,
         );
         if signed_view {
-            let value = component_at(coord, mode) * exposure;
-            if abs(value) > abs(extreme) {
-                extreme = value;
+            let value = signed_pair(coord, mode) * exposure;
+            if abs(value.x) > abs(extreme.x) {
+                extreme.x = value.x;
+            }
+            if abs(value.y) > abs(extreme.y) {
+                extreme.y = value.y;
             }
         } else {
             glow += emission(coord, mode, exposure, log_strength);
@@ -231,8 +244,20 @@ fn main_fs(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let rim = edge_glow(origin + direction * span.y, size) * vec3<f32>(0.16, 0.18, 0.22);
 
+    if mode == MODE_FIELDS {
+        // Each field gets its own hue and its own sign, so a positive Ez sheet
+        // and a positive Hz sheet are different colours and a sign flip is a
+        // different brightness rather than a different colour -- signs matter
+        // less than which field you are looking at.
+        let e = signed_log(extreme.x, log_strength);
+        let h = signed_log(extreme.y, log_strength);
+        let lit = abs(e) * ELECTRIC_TINT + abs(h) * MAGNETIC_TINT;
+        let shade = 0.5 + 0.5 * vec3<f32>(sign(e) * abs(e), 0.0, sign(h) * abs(h));
+        let field = sky * exp(-length(lit)) + lit * shade + rim;
+        return vec4<f32>(overlay(field, input.screen), 1.0);
+    }
     if signed_view {
-        let scaled = signed_log(extreme, log_strength);
+        let scaled = signed_log(extreme.x, log_strength);
         let opacity = min(abs(scaled), 1.0);
         let field = diverging(scaled) * opacity + sky * (1.0 - opacity) + rim;
         return vec4<f32>(overlay(field, input.screen), 1.0);
@@ -266,13 +291,19 @@ fn emission(coord: vec3<u32>, mode: u32, exposure: f32, log_strength: f32) -> ve
         + signed_log(pair.y, log_strength) * MAGNETIC_TINT;
 }
 
-/// The signed component a diverging view is showing: `Ez` or `Hz`.
-fn component_at(coord: vec3<u32>, mode: u32) -> f32 {
+/// The signed components a diverging view is showing.
+///
+/// `x` carries whatever the mode's primary field is; `y` is the magnetic one
+/// and is zero unless both are wanted at once.
+fn signed_pair(coord: vec3<u32>, mode: u32) -> vec2<f32> {
     let pair = signed_component(coord, 2u);
-    if mode == MODE_MAGNETIC {
-        return pair.y;
+    if mode == MODE_FIELDS {
+        return pair;
     }
-    return pair.x;
+    if mode == MODE_MAGNETIC {
+        return vec2<f32>(pair.y, 0.0);
+    }
+    return vec2<f32>(pair.x, 0.0);
 }
 
 /// A scrub bar along the bottom edge.
