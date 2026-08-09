@@ -1013,7 +1013,47 @@ pub fn numerical_phase_velocity(
 
 #[cfg(test)]
 mod tests {
-    use super::{Axis, Extent, Grid, numerical_phase_velocity};
+    use super::{Axis, Extent, Grid, Refinement, numerical_phase_velocity};
+
+    #[test]
+    fn the_lookup_table_agrees_with_the_exact_inverse() {
+        // The renderer finds cells through this table -- two loads and a lerp
+        // per ray step -- and nothing else checks it: a drifted table draws
+        // geometry in the wrong place on exactly the grids refinement exists
+        // for, while looking entirely plausible. The table is exact at the
+        // samples and piecewise linear between them, with breaks only at cell
+        // corners, so the growth cap bounds the straddling error to a
+        // fraction of a cell.
+        let grid = Grid::graded(
+            [0.048, 0.032, 0.02],
+            1e3,
+            vec![
+                Refinement::across(Axis::X, 0.006, 0.008, 0.25e-3),
+                Refinement::across(Axis::Y, -0.004, 0.006, 0.5e-3),
+            ],
+        );
+        let samples = 512usize;
+        let lookup = grid.cell_lookup(samples as u32);
+        for (section, &axis) in Axis::ALL.iter().enumerate() {
+            let spacing = grid.spacing(axis);
+            let length = spacing.length();
+            let table = &lookup[section * samples..][..samples];
+            for step in 0..=2000 {
+                // The same arithmetic the shader's `cell_of` performs.
+                let fraction = step as f32 / 2000.0;
+                let scaled = fraction * (samples - 1) as f32;
+                let low = scaled.floor() as usize;
+                let high = (low + 1).min(samples - 1);
+                let lerp = table[low] + (table[high] - table[low]) * (scaled - low as f32);
+
+                let exact = spacing.coordinate((fraction - 0.5) * length);
+                assert!(
+                    (lerp - exact).abs() < 0.5,
+                    "{axis:?} at fraction {fraction}: table says cell {lerp}, exact is {exact}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn axis_cycles() {

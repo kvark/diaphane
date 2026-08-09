@@ -45,6 +45,53 @@ fn band(half_width: f32, cell_size: f32) -> Refinement {
     Refinement::across(Axis::X, 0.0, 2.0 * half_width, cell_size)
 }
 
+#[test]
+fn stepping_back_survives_a_graded_grid() {
+    // The reverse sweeps duplicate the forward sweeps' per-cell gain and
+    // wall handling by hand, and a uniform grid cannot referee the copy:
+    // every gain it would check is the same Courant constant. A graded
+    // cavity makes the two plumbings disagree if they differ anywhere.
+    let scene = Scene::cavity_on(Grid::graded(
+        [0.040, 0.028, 0.028],
+        1.0 / CELL,
+        vec![band(0.004, FINE)],
+    ));
+    let mut simulation = cpu::Simulation::new(&scene);
+    simulation.advance_by(200);
+    let fingerprint = |simulation: &cpu::Simulation| -> Vec<f32> {
+        Axis::ALL
+            .iter()
+            .flat_map(|&axis| simulation.electric(axis).iter().copied())
+            .collect()
+    };
+    let marked = fingerprint(&simulation);
+    let excited = simulation.energy().total();
+
+    simulation.advance_by(150);
+    simulation.reverse_by(150);
+    let returned = fingerprint(&simulation);
+    let peak = marked.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+    let worst = marked
+        .iter()
+        .zip(returned.iter())
+        .fold(0.0f32, |acc, (&a, &b)| acc.max((a - b).abs()));
+    assert!(peak > 0.0);
+    assert!(
+        worst < 1e-4 * peak,
+        "reversal missed by {:e} of the peak on a graded grid",
+        worst / peak
+    );
+
+    // All the way back: the source retracts exactly, so an empty domain
+    // should be what remains.
+    simulation.reverse_by(200);
+    let residual = simulation.energy().total();
+    assert!(
+        residual < 1e-8 * excited,
+        "residual energy {residual:e} of {excited:e} after unwinding to step 0"
+    );
+}
+
 /// The controlled reference: fine along x *everywhere*, transverse
 /// discretization identical to the graded grid's.
 ///

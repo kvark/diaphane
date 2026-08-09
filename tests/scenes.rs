@@ -7,7 +7,9 @@
 //! still describe a resolvable problem, so they cannot rot silently while the
 //! types around them change.
 
-use diaphane::{Extent, Material, Scene, Shape, cpu};
+use diaphane::{
+    Axis, Extent, Material, Refinement, Scene, Shape, Source, Waveform, cpu, grid::Grid,
+};
 use std::{fs, path::PathBuf};
 
 fn scene_directory() -> PathBuf {
@@ -140,6 +142,41 @@ fn a_saved_scene_reloads_identically() {
 fn a_syntax_error_is_reported_rather_than_panicking() {
     let error = Scene::from_ron("Scene(grid: Grid(extent: Extent(x: 4").unwrap_err();
     assert!(!error.is_empty(), "the parse error carried no message");
+}
+
+#[test]
+fn a_graded_scene_survives_a_round_trip() {
+    // The preset round trips above all ride uniform grids, which cannot see a
+    // mistake in the graded recipe: `Grid` serializes as the `GridSpec` that
+    // built it, so dropping, say, `max_ratio` on the way out would quietly
+    // remesh every saved scene on reload. Scene equality includes the resolved
+    // spacing, so this asserts the rebuilt mesh, not merely the recipe.
+    let grid = Grid::graded_at(
+        [0.048, 0.032, 0.02],
+        1e3,
+        vec![Refinement::across(Axis::X, 0.006, 0.008, 0.25e-3)],
+        1.05,
+    );
+    let mut scene = Scene::on_grid(grid);
+    let frequency = scene.grid.frequency_for_resolution(24.0);
+    let film = scene.materials.push(Material::refractive(2.0));
+    scene.shapes.push(Shape::Slab {
+        axis: Axis::X,
+        offset: 0.006,
+        thickness: 0.002,
+        material: film,
+    });
+    let scene = scene.with_source(Source::point(
+        [0.0; 3],
+        Axis::Z,
+        Waveform::ricker(frequency),
+    ));
+    // The grading engaged: more cells along x than the coarse recipe asks for.
+    assert!(scene.grid.extent.x > 48);
+
+    let text = scene.to_ron().unwrap();
+    let reloaded = Scene::from_ron(&text).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(reloaded, scene);
 }
 
 #[test]
