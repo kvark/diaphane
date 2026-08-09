@@ -405,10 +405,9 @@ fn scrub_bar(screen: vec2<f32>) -> vec4<f32> {
     if height <= 0.0 {
         return vec4<f32>(0.0);
     }
-    // Both this and the host's hit test measure from the bottom edge as a
-    // fraction of the *image*, so `screen.y` (which spans -1 to 1) is halved.
-    // Leaving it unhalved makes the region the pointer scrubs in twice the
-    // region that is drawn, which reads as the bar responding above itself.
+    // Measured from the bottom edge as a fraction of the *image*, so
+    // `screen.y` (which spans -1 to 1) is halved; unhalved, the bar draws
+    // twice as tall as the constant says.
     let from_bottom = 0.5 * (screen.y + 1.0);
     if from_bottom > height {
         return vec4<f32>(0.0);

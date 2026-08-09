@@ -150,7 +150,7 @@ in [`src/grid.rs`](src/grid.rs) and referred to from everywhere else. Every FDTD
 
 ## Validation
 
-`cargo test` runs 114 checks without needing a GPU, and the ones worth naming
+`cargo test` runs 117 checks without needing a GPU, and the ones worth naming
 are the ones that could not pass by accident: an **exact discrete plane wave**
 seeded and required to propagate exactly — not a discretized continuum
 solution, a solution of the stepping scheme itself; **numerical phase velocity**

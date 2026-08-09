@@ -25,9 +25,10 @@ pub enum ViewMode {
     /// Electric and magnetic energy density in opposing hues, which is where
     /// a standing wave visibly trades energy between them.
     Energy,
-    /// Signed `Ez` through a diverging colormap.
+    /// The dominant `E` component, signed, through a diverging colormap.
+    /// Which component that is gets measured per frame, not assumed.
     Electric,
-    /// Signed `Hz`.
+    /// The dominant `H` component, signed.
     Magnetic,
     /// Total energy density, monochrome.
     Magnitude,
@@ -53,11 +54,14 @@ impl ViewMode {
     ];
 
     pub fn label(self) -> &'static str {
+        // "signed E", not "Ez": the renderer displays whichever component
+        // carries the field, measured per frame, so naming one would lie in
+        // any scene that is not z-polarized.
         match self {
             Self::Fields => "E and H",
             Self::Energy => "energy split",
-            Self::Electric => "Ez",
-            Self::Magnetic => "Hz",
+            Self::Electric => "signed E",
+            Self::Magnetic => "signed H",
             Self::Magnitude => "total energy",
             Self::Grid => "the grid",
             Self::Ribbons => "E and H as ribbons",
@@ -119,23 +123,10 @@ pub struct ScrubBar {
 }
 
 impl ScrubBar {
-    /// Height of the bar as a fraction of the image, and so also the region
-    /// the pointer treats as a scrub rather than an orbit. The shader uses the
-    /// same number in the same units, which is the point of it being one
-    /// constant.
+    /// Height of the bar as a fraction of the image. The shader draws with
+    /// the same constant. This bar is display only — the window's interactive
+    /// scrubbing is the egui slider, so there is no hit test to keep in sync.
     pub const HEIGHT: f32 = 0.045;
-
-    /// The fraction a pointer at horizontal screen position `x` (in pixels)
-    /// selects.
-    pub fn fraction_at(x: f64, width: u32) -> f32 {
-        (x as f32 / width.max(1) as f32).clamp(0.0, 1.0)
-    }
-
-    /// Whether a pointer at `y` pixels from the top is over the bar.
-    pub fn contains(y: f64, height: u32) -> bool {
-        let from_bottom = 1.0 - (y as f32 / height.max(1) as f32);
-        (0.0..Self::HEIGHT).contains(&from_bottom)
-    }
 }
 
 impl ViewSettings {
@@ -617,9 +608,12 @@ pub struct Animation {
 
 impl Animation {
     pub fn new(width: u32, height: u32, delay_centiseconds: u16) -> Self {
+        // The format stores dimensions in sixteen bits; a silent truncation
+        // here would corrupt every frame rather than refuse the first one.
+        let side = |pixels: u32| u16::try_from(pixels).expect("GIF dimensions cap at 65535");
         Self {
             frames: Vec::new(),
-            size: (width as u16, height as u16),
+            size: (side(width), side(height)),
             // 2 is the floor most viewers honour; below it they substitute
             // their own and the animation plays at an unrelated speed.
             delay: delay_centiseconds.max(2),

@@ -263,6 +263,11 @@ impl App {
         } else {
             0
         };
+        // Whether the fields changed this frame -- stepping or seeking -- so
+        // the auto-exposure knows to fold in the fresh measurement. Freezing
+        // it across a paused scrub left the scale of one step exposing the
+        // picture of another: near-black after scrubbing loud to quiet.
+        let mut advanced = steps > 0;
         self.simulation.advance_by(steps);
         // The solver has to have finished before its buffers are sampled: the
         // renderer reads the very same allocations the kernels write.
@@ -348,6 +353,16 @@ impl App {
                 self.simulation.wait();
                 self.timeline.observe(&mut self.simulation);
                 self.furthest = self.furthest.max(Steppable::step_count(&self.simulation));
+                advanced = true;
+            }
+            if commands.toggle_running
+                || commands.reset
+                || commands.steps_per_frame.is_some()
+                || target.is_some()
+            {
+                // While paused the loop only redraws on demand, and a command
+                // changes what the next frame should show.
+                window.request_redraw();
             }
         }
 
@@ -362,7 +377,7 @@ impl App {
             size,
             &self.simulation,
             &self.common.settings,
-            steps > 0,
+            advanced,
         );
         {
             // A second pass that loads rather than clears, so the panel lands
@@ -526,6 +541,14 @@ impl ApplicationHandler for App {
             (Some(window), Some(state)) => state.on_window_event(window, &event).consumed,
             _ => false,
         };
+        if !matches!(event, WindowEvent::RedrawRequested)
+            && let Some(window) = self.window.as_ref()
+        {
+            // While paused the continuous loop is off, so interaction is what
+            // schedules frames -- including interaction egui consumes, which
+            // is how the panel stays live under a pointer.
+            window.request_redraw();
+        }
         if consumed && !matches!(event, WindowEvent::RedrawRequested) {
             return;
         }
@@ -595,9 +618,18 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
-        if let Some(window) = self.window.as_ref() {
+        // Paused means paused: no continuous redraw of a static picture, no
+        // busy-spinning event loop. Events request their own frames, and the
+        // smoke test keeps the free-running loop because it counts frames.
+        let free_running = self.running || self.exit_after.is_some();
+        if free_running && let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
+        event_loop.set_control_flow(if free_running {
+            ControlFlow::Poll
+        } else {
+            ControlFlow::Wait
+        });
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
