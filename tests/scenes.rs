@@ -109,7 +109,7 @@ fn the_curated_scenes_actually_paint_their_geometry() {
 #[test]
 fn the_curated_scenes_run() {
     // Cheap, but it catches a scene that parses and validates and then panics
-    // on construction — an absorbing layer thicker than the domain, say.
+    // on construction — the class of mistake `validate` cannot see coming.
     for path in scene_files() {
         let scene = Scene::load(&path).unwrap_or_else(|e| panic!("{e}"));
         let mut simulation = cpu::Simulation::new(&scene.with_resolution(400.0));
@@ -140,4 +140,15 @@ fn a_saved_scene_reloads_identically() {
 fn a_syntax_error_is_reported_rather_than_panicking() {
     let error = Scene::from_ron("Scene(grid: Grid(extent: Extent(x: 4").unwrap_err();
     assert!(!error.is_empty(), "the parse error carried no message");
+}
+
+#[test]
+fn a_zero_cell_size_is_reported_rather_than_panicking() {
+    // Not a syntax error: the file parses, and the mistake used to detonate
+    // an assert inside deserialization instead of coming back as the `Err`
+    // that `from_ron` promises.
+    let text = Scene::slab(Extent::cube(24), 1.8).to_ron().unwrap();
+    assert!(text.contains("cell_size: 0.001"), "{text}");
+    let error = Scene::from_ron(&text.replace("cell_size: 0.001", "cell_size: 0.0")).unwrap_err();
+    assert!(error.contains("cell_size"), "{error}");
 }

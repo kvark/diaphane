@@ -340,7 +340,7 @@ impl Refinement {
 #[cfg_attr(
     feature = "serde",
     derive(serde::Deserialize, serde::Serialize),
-    serde(from = "GridSpec", into = "GridSpec")
+    serde(try_from = "GridSpec", into = "GridSpec")
 )]
 pub struct Grid {
     /// Size of the grid in cells. Derived from the spacing when the grid is
@@ -887,15 +887,52 @@ fn grade(
     Spacing::from_widths(widths)
 }
 
-impl From<GridSpec> for Grid {
-    fn from(spec: GridSpec) -> Self {
-        Self::build(
+/// The deserialization entry. A scene file is hand-edited text, so the
+/// contract violations `build` treats as programmer error -- and enforces with
+/// asserts -- have to come back from here as parse errors instead: `from_ron`
+/// promises an `Err`, not a panic three frames inside a serde impl.
+impl TryFrom<GridSpec> for Grid {
+    type Error = String;
+
+    fn try_from(spec: GridSpec) -> Result<Self, String> {
+        let cells = spec.extent.as_array();
+        if cells.iter().any(|&n| n < 2) {
+            return Err(format!(
+                "a grid needs at least 2 cells on every axis, got {:?}",
+                spec.extent
+            ));
+        }
+        if !(spec.cell_size > 0.0 && spec.cell_size.is_finite()) {
+            return Err(format!(
+                "cell_size must be positive and finite, got {}",
+                spec.cell_size
+            ));
+        }
+        if !(spec.courant > 0.0 && spec.courant <= Self::COURANT_LIMIT) {
+            return Err(format!(
+                "courant must lie in (0, {}], got {}",
+                Self::COURANT_LIMIT,
+                spec.courant
+            ));
+        }
+        if !(spec.max_ratio > 1.0 && spec.max_ratio.is_finite()) {
+            return Err(format!("max_ratio must exceed 1, got {}", spec.max_ratio));
+        }
+        for refinement in spec.refinements.iter() {
+            if !(refinement.cell_size > 0.0 && refinement.cell_size.is_finite()) {
+                return Err(format!(
+                    "a refinement's cell_size must be positive and finite, got {}",
+                    refinement.cell_size
+                ));
+            }
+        }
+        Ok(Self::build(
             spec.extent,
             spec.cell_size,
             spec.courant,
             spec.refinements,
             spec.max_ratio,
-        )
+        ))
     }
 }
 
