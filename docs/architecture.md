@@ -131,33 +131,47 @@ sources outside it, and says so in those words.
 
 [`Scene::with_resolution`]: ../src/scene.rs
 
-## Deviation 5: no `egui` yet
+## Deviation 5: a control panel, and scene authoring by file
 
-The brief's Phase 3 is an interaction layer built on egui. The viewer here has
-time controls, camera control, view-mode switching, brightness and signed-log
-toggles on the keyboard, with the perf HUD — steps/s, effective GB/s, frame
-time, simulation time, keyframe count and memory — in the window title.
+The brief's Phase 3 is an interaction layer on egui, and that is what the
+viewer has: a panel with the transport, a scrub slider over the whole run, the
+view mode, brightness, and the perf numbers — steps/s, effective GB/s, frame
+time, simulated time, keyframe count and memory — which used to live in the
+window title, where numbers go to be ignored.
 
-Scene authoring is by **file**, not by pointer. `--scene <path.ron>` loads one
-and `--save-scene <path>` writes the resolved scene out, so the way in is: take
-a preset, dump it, edit it. [`scenes/`](../scenes) holds five commented
-examples, and `tests/scenes.rs` parses, validates, rasterizes and steps every
-one of them so they cannot rot.
+The panel is a pure function of a `Readout` into a `Commands`: it renders
+numbers it was handed and records intent it does not act on, and the caller
+applies that intent afterwards in one place. That is partly a borrow-checker
+convenience and mostly a correctness one — it means "the slider moved" and "the
+solver stepped" cannot interleave differently depending on which widget was
+touched.
 
-RON rather than JSON because it round-trips Rust enums without a tag
-convention and allows comments, and a scene file is meant to be read. The
-alternative most FDTD packages take — Meep, Lumerical — is for a scene to be a
-*program*, which is more expressive and cannot be diffed, hashed, or handed to
-a solver you did not compile. Tidy3D is the counterexample that proves the
-point: its scenes are declarative JSON because the solver runs elsewhere and
-the scene has to travel.
+**Stepping backwards is a seek, not an inverse update.** `cpu::Simulation` can
+run leapfrog backwards exactly, because it is an involution, but the GPU solver
+has no reverse kernel — so the viewer's step-back restores the nearest earlier
+keyframe and replays forward. Correct always; instant only inside the keyframe
+window, and the panel says which part of the run that is rather than leaving a
+long drag's pause unexplained.
 
-The brief's painting and dragging are still untouched, and there is a reason
-beyond effort: they would break the timeline. Everything about scrubbing rests
-on the state depending only on the step number, and mutating geometry while
-the solver runs makes it depend on the history of edits instead. The brief's
-own answer — commit the geometry and reset the fields — generalizes: an edit
-starts a new take with its own `t = 0`, and a timeline scrubs within one take.
+What is still not implemented is the brief's *painting*: geometry authoring is
+by file, not by pointer. `--scene <path.ron>` loads one and `--save-scene`
+writes the resolved scene out, so the way in is take a preset, dump it, edit it.
+[`scenes/`](../scenes) holds six commented examples and `tests/scenes.rs`
+parses, validates, rasterizes and steps every one so they cannot rot.
+
+RON rather than JSON because it round-trips Rust enums without a tag convention
+and allows comments, and a scene file is meant to be read. The alternative most
+FDTD packages take — Meep, Lumerical — is for a scene to be a *program*, which
+is more expressive and cannot be diffed, hashed, or handed to a solver you did
+not compile. Tidy3D is the counterexample that proves the point: its scenes are
+declarative JSON because the solver runs elsewhere and the scene has to travel.
+
+Painting would also break the timeline, and that is the deeper reason it has not
+happened. Everything about scrubbing rests on the state depending only on the
+step number; mutating geometry mid-run makes it depend on the history of edits
+instead. The brief's own answer — commit the geometry and reset the fields —
+generalizes: an edit starts a new take with its own `t = 0`, and a timeline
+scrubs within one take.
 
 ## Deviation 6: a time slider, built on determinism
 

@@ -21,4 +21,8 @@
 
 pub mod camera;
 pub mod options;
+// Only the viewer has a UI; the offscreen renderer has no event loop to feed
+// one and no display to put it on.
+#[cfg(feature = "gui")]
+pub mod panel;
 pub mod render;

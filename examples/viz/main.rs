@@ -8,7 +8,8 @@ mod common;
 
 use crate::common::{
     options::{Args, COMMON_HELP, Common, TIMEOUT_MS, init_logging},
-    render::{Renderer, ScrubBar, ViewMode},
+    panel::{self, Readout},
+    render::{Renderer, ViewMode},
 };
 use blade_graphics as gpu;
 use diaphane::{
@@ -43,7 +44,10 @@ fn keyframe_capacity(cells: usize) -> usize {
 }
 
 const KEYS: &str = "\
-KEYS
+The panel along the bottom has the transport, the scrub slider, the view mode
+and the numbers. The keyboard shadows it, for the things worth doing without
+aiming:
+
     space          pause / resume
     R              reset the fields
     left / right   solver steps per frame
@@ -52,14 +56,14 @@ KEYS
     - / =          brightness
     [ / ]          scrub back / forward one keyframe interval
     home           scrub to the start
-    drag           orbit, or scrub when the pointer is on the bar
+    drag           orbit
     scroll         zoom
     escape         quit
 
-The bar along the bottom is the timeline. The lighter span is what keyframes
-cover and can be scrubbed to instantly; dragging outside it replays from the
-start, which is slower but always available -- the state here is a pure
-function of the step number, so a replayed step is the step.
+Scrubbing inside the keyframed span restores a snapshot; outside it the run
+replays from the start, which is slower and always correct -- the state is a
+pure function of the step number, so a replayed step is the step. Stepping
+*backwards* is that same replay: the GPU solver only runs forwards.
 ";
 
 fn help() -> String {
@@ -129,12 +133,20 @@ struct App {
     encoder: gpu::CommandEncoder,
     sync_point: Option<gpu::SyncPoint>,
     timeline: Timeline,
+    egui_context: egui::Context,
+    egui_winit: Option<egui_winit::State>,
+    gui: Option<blade_egui::GuiPainter>,
     running: bool,
     dragging: bool,
-    scrubbing: bool,
     cursor: Option<(f64, f64)>,
     last_frame: Instant,
     steps_per_second: f32,
+    /// Tessellated egui primitives in the last frame.
+    ///
+    /// Reported on exit because a panel that silently stops drawing looks
+    /// exactly like a panel that is drawing correctly, from out here. Under a
+    /// virtual display there is nobody to notice, so the count is the evidence.
+    panel_primitives: usize,
     /// Furthest step reached, which is what the scrub bar spans.
     furthest: u64,
 }
@@ -187,13 +199,16 @@ fn run(common: Common, exit_after: Option<u64>) -> Result<(), Box<dyn Error>> {
         // keeps that off the per-frame path, and the budget is what keeps the
         // window from growing without bound.
         timeline: Timeline::new(KEYFRAME_INTERVAL, keyframes),
+        egui_context: egui::Context::default(),
+        egui_winit: None,
+        gui: None,
         sync_point: None,
         running: true,
         dragging: false,
-        scrubbing: false,
         cursor: None,
         last_frame: Instant::now(),
         steps_per_second: 0.0,
+        panel_primitives: 0,
         furthest: 0,
     };
     event_loop.run_app(&mut app)?;
@@ -216,10 +231,12 @@ impl App {
     }
 
     fn redraw(&mut self) {
-        let (Some(window), Some(surface), Some(renderer)) = (
+        let (Some(window), Some(surface), Some(renderer), Some(gui), Some(egui_winit)) = (
             self.window.as_ref(),
             self.surface.as_mut(),
             self.renderer.as_mut(),
+            self.gui.as_mut(),
+            self.egui_winit.as_mut(),
         ) else {
             return;
         };
@@ -244,22 +261,79 @@ impl App {
             self.timeline.observe(&mut self.simulation);
             self.furthest = self.furthest.max(Steppable::step_count(&self.simulation));
         }
-        // Computed inline rather than through `self.scrub_bar()`, which would
-        // need a second borrow of `self` while `surface` is held mutably.
-        let furthest = self.furthest.max(1) as f32;
-        self.common.settings.scrub = Some(ScrubBar {
-            played: Steppable::step_count(&self.simulation) as f32 / furthest,
-            window_start: self.timeline.earliest().unwrap_or(0) as f32 / furthest,
-        });
 
         let seconds = elapsed.as_secs_f32().max(1e-6);
         let instant_rate = steps as f32 / seconds;
         self.steps_per_second += 0.1 * (instant_rate - self.steps_per_second);
 
+        // Sampled before the panel runs, so every widget in one frame reports
+        // the same instant rather than each reading a different one.
+        let readout = Readout {
+            step: Steppable::step_count(&self.simulation),
+            furthest: self.furthest,
+            window_start: self.timeline.earliest().unwrap_or(0),
+            time: self.simulation.time(),
+            steps_per_second: self.steps_per_second,
+            gigabytes_per_second: self.steps_per_second as f64
+                * self.simulation.bytes_per_step() as f64
+                / 1e9,
+            frame_milliseconds: seconds * 1e3,
+            keyframes: self.timeline.keyframe_count(),
+            keyframe_megabytes: self.timeline.bytes() as f64 / 1e6,
+            running: self.running,
+            steps_per_frame: self.common.steps_per_frame,
+            reversible: false,
+        };
+
+        let raw_input = egui_winit.take_egui_input(window);
+        let mut commands = None;
+        let output = self.egui_context.run_ui(raw_input, |ui| {
+            commands = Some(panel::draw(ui, &readout, &mut self.common.settings));
+        });
+        egui_winit.handle_platform_output(window, output.platform_output);
+        let jobs = self
+            .egui_context
+            .tessellate(output.shapes, output.pixels_per_point);
+        self.panel_primitives = jobs.len();
+
+        // Applied here rather than inside the panel: the UI records intent and
+        // the simulation is moved in one place, so "the slider moved" and "the
+        // solver stepped" cannot interleave differently per widget.
+        if let Some(commands) = commands {
+            if commands.toggle_running {
+                self.running = !self.running;
+            }
+            if let Some(per_frame) = commands.steps_per_frame {
+                self.common.steps_per_frame = per_frame;
+            }
+            if commands.reset {
+                self.simulation.reset();
+                self.timeline.clear();
+                self.furthest = 0;
+                self.running = false;
+            }
+            let current = Steppable::step_count(&self.simulation);
+            let target = commands.seek.or_else(|| {
+                (commands.step_by != 0).then(|| {
+                    (current as i64 + commands.step_by).clamp(0, self.furthest as i64) as u64
+                })
+            });
+            if let Some(target) = target
+                && target != current
+            {
+                // Any move on the timeline pauses, because a slider that keeps
+                // advancing under the pointer is not a slider.
+                self.running = false;
+                self.timeline.seek(&mut self.simulation, target);
+                self.simulation.wait();
+            }
+        }
+
         let frame = surface.acquire_frame();
         self.encoder.start();
         self.encoder.init_texture(frame.texture());
         let size = Self::surface_config(window.inner_size()).size;
+        gui.update_textures(&mut self.encoder, &output.textures_delta, &self.context);
         renderer.draw(
             &mut self.encoder,
             frame.texture_view(),
@@ -268,38 +342,37 @@ impl App {
             &self.common.settings,
             steps > 0,
         );
+        {
+            // A second pass that loads rather than clears, so the panel lands
+            // on top of the volume. Keeping it out of `Renderer` is what lets
+            // the offscreen program share the render pass without linking a UI
+            // toolkit it has no display for.
+            let mut pass = self.encoder.render(
+                "panel",
+                gpu::RenderTargetSet {
+                    colors: &[gpu::RenderTarget {
+                        view: frame.texture_view(),
+                        init_op: gpu::InitOp::Load,
+                        finish_op: gpu::FinishOp::Store,
+                    }],
+                    depth_stencil: None,
+                },
+            );
+            gui.paint(
+                &mut pass,
+                &jobs,
+                &blade_egui::ScreenDescriptor {
+                    physical_size: (size.width, size.height),
+                    scale_factor: output.pixels_per_point,
+                },
+                &self.context,
+            );
+        }
         self.encoder.present(frame);
-        self.sync_point = Some(self.context.submit(&mut self.encoder));
+        let sync_point = self.context.submit(&mut self.encoder);
+        gui.after_submit(&sync_point);
+        self.sync_point = Some(sync_point);
         self.presented += 1;
-
-        let bandwidth =
-            self.steps_per_second as f64 * self.simulation.bytes_per_step() as f64 / 1e9;
-        window.set_title(&format!(
-            "diaphane — {:.0} steps/s · {:.1} GB/s · {:.2} ms · step {} · t = {:.2} ns · \
-             {} · gain {:.2} · {} keyframes / {:.0} MB{}{}",
-            self.steps_per_second,
-            bandwidth,
-            seconds * 1e3,
-            Steppable::step_count(&self.simulation),
-            self.simulation.time() * 1e9,
-            self.common.settings.mode.label(),
-            self.common.settings.gain,
-            self.timeline.keyframe_count(),
-            self.timeline.bytes() as f64 / 1e6,
-            if self.common.settings.log_strength > 0.0 {
-                " · log"
-            } else {
-                ""
-            },
-            if self.running { "" } else { " · PAUSED" },
-        ));
-    }
-
-    fn surface_size(&self) -> gpu::Extent {
-        self.window
-            .as_ref()
-            .map(|window| Self::surface_config(window.inner_size()).size)
-            .unwrap_or_default()
     }
 
     /// Moves to a fraction of the run so far.
@@ -392,6 +465,15 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        self.gui = Some(blade_egui::GuiPainter::new(surface.info(), &self.context));
+        self.egui_winit = Some(egui_winit::State::new(
+            self.egui_context.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        ));
         let mut renderer = Renderer::new(Arc::clone(&self.context), surface.info().format);
         // Same priming as the offscreen path: exposure is the reciprocal of a
         // measurement that is one frame behind.
@@ -410,6 +492,17 @@ impl ApplicationHandler for App {
         _window: WindowId,
         event: WindowEvent,
     ) {
+        // egui sees every event first and says whether it wants it. Without
+        // that, dragging a slider also orbits the camera and typing in the
+        // panel also toggles the view mode -- the pointer is over a widget, so
+        // the widget owns it.
+        let consumed = match (self.window.as_ref(), self.egui_winit.as_mut()) {
+            (Some(window), Some(state)) => state.on_window_event(window, &event).consumed,
+            _ => false,
+        };
+        if consumed && !matches!(event, WindowEvent::RedrawRequested) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -429,28 +522,14 @@ impl ApplicationHandler for App {
                 if button != MouseButton::Left {
                     return;
                 }
-                let pressed = state == ElementState::Pressed;
-                // Which gesture this is gets decided on press and held until
-                // release, so a scrub that wanders off the bar keeps scrubbing
-                // rather than suddenly spinning the camera.
-                if pressed && let Some((x, y)) = self.cursor {
-                    let size = self.surface_size();
-                    self.scrubbing = ScrubBar::contains(y, size.height);
-                    if self.scrubbing {
-                        self.scrub_to(ScrubBar::fraction_at(x, size.width));
-                    }
-                }
-                self.dragging = pressed;
-                if !pressed {
-                    self.scrubbing = false;
-                }
+                // Always an orbit now. Scrubbing is the panel's slider, and a
+                // drag that reaches here is one egui declined -- so the pointer
+                // is over the volume, and over the volume a drag turns it.
+                self.dragging = state == ElementState::Pressed;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let current = (position.x, position.y);
-                if self.dragging && self.scrubbing {
-                    let width = self.surface_size().width;
-                    self.scrub_to(ScrubBar::fraction_at(current.0, width));
-                } else if self.dragging
+                if self.dragging
                     && let Some(previous) = self.cursor
                 {
                     let delta = (current.0 - previous.0, current.1 - previous.1);
@@ -480,10 +559,12 @@ impl ApplicationHandler for App {
         // nobody notices breaking.
         if self.exit_after.is_some_and(|limit| self.presented >= limit) {
             println!(
-                "presented {} frames, {} solver steps, {:.0} steps/s",
+                "presented {} frames, {} solver steps, {:.0} steps/s, \
+                 {} panel primitives",
                 self.presented,
                 Steppable::step_count(&self.simulation),
                 self.steps_per_second,
+                self.panel_primitives,
             );
             event_loop.exit();
             return;
@@ -496,6 +577,9 @@ impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(sync_point) = self.sync_point.take() {
             let _ = self.context.wait_for(&sync_point, TIMEOUT_MS);
+        }
+        if let Some(mut gui) = self.gui.take() {
+            gui.destroy(&self.context);
         }
         if let Some(mut renderer) = self.renderer.take() {
             renderer.destroy();

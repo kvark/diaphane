@@ -11,6 +11,11 @@ categories = ["science", "simulation", "graphics"]
 
 [features]
 default = []
+# Not a library feature at all -- there is nothing in `src/` behind it. It
+# exists so the `viz` example can compile its control panel while `render`,
+# which has no event loop to feed one, does not. Cargo has no per-example
+# features, so this is the spelling.
+gui = []
 # Scene files. Optional because the solver does not need to read one to run,
 # but this is library API -- `Scene` is the interchange format -- so it is a
 # feature rather than something only the examples can reach.
@@ -30,11 +35,15 @@ ron = { version = "0.12", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
+blade-egui = "0.8.1"
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 # Depending on ourselves turns `serde` on for the examples, tests and benches
 # without turning it on for anyone else: a bare `cargo build` still resolves to
 # the four dependencies above, while `cargo test` covers the scene format.
 diaphane = { path = ".", features = ["serde"] }
+egui = "0.34"
+egui-winit = "0.34"
+gif = "0.14.2"
 # The only 3D FDTD solver published on crates.io, and so the ecosystem baseline
 # the `ecosystem` benchmark measures against.
 # Its default feature set is the only one that builds: the prelude reaches for
@@ -75,6 +84,7 @@ pattern_type_mismatch = "warn"
 [[example]]
 name = "viz"
 path = "examples/viz/main.rs"
+required-features = ["gui"]
 test = true
 
 [[example]]

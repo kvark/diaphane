@@ -526,14 +526,19 @@ impl Capture {
         );
     }
 
-    /// Writes the last captured frame. Call only after the submission that
-    /// ran [`Self::copy_out`] has completed.
-    pub fn write_png(&self, path: &Path) -> io::Result<()> {
+    /// The last captured frame as RGBA bytes. Call only after the submission
+    /// that ran [`Self::copy_out`] has completed.
+    pub fn pixels(&self) -> &[u8] {
         self.context.sync_buffer(self.readback);
         let byte_count = (self.size.width * self.size.height * 4) as usize;
         // SAFETY: `readback` is host-visible and holds exactly this many bytes,
         // written by a copy the caller has waited on.
-        let pixels = unsafe { std::slice::from_raw_parts(self.readback.data(), byte_count) };
+        unsafe { std::slice::from_raw_parts(self.readback.data(), byte_count) }
+    }
+
+    /// Writes the last captured frame.
+    pub fn write_png(&self, path: &Path) -> io::Result<()> {
+        let pixels = self.pixels();
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -556,5 +561,66 @@ impl Capture {
         self.context.destroy_buffer(self.readback);
         self.context.destroy_texture_view(self.view);
         self.context.destroy_texture(self.texture);
+    }
+}
+
+/// Collects frames and writes them out as one animated GIF.
+///
+/// A GIF rather than a video because it plays inline in a README with no
+/// player, no autoplay policy and no codec — the format is ancient and that is
+/// exactly the point. The cost is 256 colours per frame, which a dark volume
+/// render with two hues survives better than most content would.
+pub struct Animation {
+    frames: Vec<Vec<u8>>,
+    size: (u16, u16),
+    /// Hundredths of a second per frame, which is the only unit GIF has.
+    delay: u16,
+}
+
+impl Animation {
+    pub fn new(width: u32, height: u32, delay_centiseconds: u16) -> Self {
+        Self {
+            frames: Vec::new(),
+            size: (width as u16, height as u16),
+            // 2 is the floor most viewers honour; below it they substitute
+            // their own and the animation plays at an unrelated speed.
+            delay: delay_centiseconds.max(2),
+        }
+    }
+
+    pub fn push(&mut self, rgba: &[u8]) {
+        self.frames.push(rgba.to_vec());
+    }
+
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = io::BufWriter::new(fs::File::create(path)?);
+        let mut encoder = gif::Encoder::new(&mut file, self.size.0, self.size.1, &[])
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        encoder
+            .set_repeat(gif::Repeat::Infinite)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        for pixels in &self.frames {
+            let mut copy = pixels.clone();
+            // Quantizes per frame. A shared palette would be smaller and would
+            // band less, but a wave packet's colours drift as it moves, so a
+            // per-frame palette is what keeps the tail from posterizing.
+            let mut frame = gif::Frame::from_rgba_speed(self.size.0, self.size.1, &mut copy, 10);
+            frame.delay = self.delay;
+            encoder
+                .write_frame(&frame)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
     }
 }

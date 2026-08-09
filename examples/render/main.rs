@@ -10,7 +10,7 @@ mod common;
 
 use crate::common::{
     options::{Args, COMMON_HELP, Common, TIMEOUT_MS, init_logging},
-    render::{Capture, Renderer, ScrubBar},
+    render::{Animation, Capture, Renderer, ScrubBar},
 };
 use blade_graphics as gpu;
 use diaphane::gpu::Simulation;
@@ -27,6 +27,10 @@ struct Options {
     frames: u32,
     output_dir: PathBuf,
     save_scene: Option<PathBuf>,
+    /// Collect the frames into one animated GIF instead of writing PNGs.
+    gif: Option<PathBuf>,
+    /// Hundredths of a second per GIF frame.
+    gif_delay: u16,
     /// Draw the scrub bar into the frames too. Off by default because these
     /// are meant to be clean images; CI turns it on so that branch of the
     /// shader is not dead code.
@@ -40,6 +44,8 @@ impl Default for Options {
             frames: 1,
             output_dir: PathBuf::from("frames"),
             save_scene: None,
+            gif: None,
+            gif_delay: 5,
             timeline: false,
         }
     }
@@ -58,6 +64,8 @@ OPTIONS:
     --frames <N>                  how many frames to write   [default: 1]
     --output-dir <PATH>           where the PNGs go          [default: frames]
     --save-scene <PATH>           write the scene out and exit
+    --gif <PATH>                  collect the frames into one animated GIF
+    --gif-delay <CENTISECONDS>    per GIF frame                [default: 5]
     --timeline                    draw the scrub bar into the frames
 
 Needs no window system, so this is what CI runs.
@@ -80,6 +88,8 @@ fn parse() -> Result<Options, String> {
             "--frames" => options.frames = args.parse(&flag)?,
             "--output-dir" => options.output_dir = PathBuf::from(args.value(&flag)?),
             "--save-scene" => options.save_scene = Some(PathBuf::from(args.value(&flag)?)),
+            "--gif" => options.gif = Some(PathBuf::from(args.value(&flag)?)),
+            "--gif-delay" => options.gif_delay = args.parse(&flag)?,
             "--timeline" => options.timeline = true,
             other => return Err(format!("unknown flag {other:?}; try --help")),
         }
@@ -157,6 +167,13 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
         simulation.wait();
     }
 
+    let mut animation = options.gif.as_ref().map(|_| {
+        Animation::new(
+            options.common.width,
+            options.common.height,
+            options.gif_delay,
+        )
+    });
     let mut settings = options.common.settings;
     for frame in 0..frames {
         simulation.advance_by(u64::from(options.common.steps_per_frame));
@@ -195,15 +212,28 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
         let sync_point = context.submit(&mut encoder);
         context.wait_for(&sync_point, TIMEOUT_MS)?;
 
-        let path = options.output_dir.join(format!("frame{frame:04}.png"));
-        capture.write_png(&path)?;
+        let where_it_went = match animation.as_mut() {
+            Some(animation) => {
+                animation.push(capture.pixels());
+                format!("frame {}", animation.len())
+            }
+            None => {
+                let path = options.output_dir.join(format!("frame{frame:04}.png"));
+                capture.write_png(&path)?;
+                path.display().to_string()
+            }
+        };
         println!(
-            "{}  step {}  t = {:.3} ns  peak = {:.3e}",
-            path.display(),
+            "{where_it_went}  step {}  t = {:.3} ns  peak = {:.3e}",
             simulation.step_count(),
             simulation.time() * 1e9,
             renderer.scale()
         );
+    }
+
+    if let (Some(animation), Some(path)) = (animation.as_ref(), options.gif.as_ref()) {
+        animation.write(path)?;
+        println!("wrote {} ({} frames)", path.display(), animation.len());
     }
 
     context.destroy_command_encoder(&mut encoder);
