@@ -78,8 +78,13 @@ impl ViewMode {
 
     fn is_signed(self) -> bool {
         match self {
-            Self::Electric | Self::Magnetic => true,
-            Self::Energy | Self::Magnitude | Self::Grid | Self::Ribbons => false,
+            // Ribbons deflect by a field *amplitude*, so they need the
+            // amplitude exposure like every other signed view -- the energy
+            // scale would leave a spurious factor of the field peak in the
+            // deflection, blowing the ribbons into planes in quiet scenes and
+            // collapsing them in loud ones.
+            Self::Electric | Self::Magnetic | Self::Ribbons => true,
+            Self::Energy | Self::Magnitude | Self::Grid => false,
             Self::Fields => true,
         }
     }
