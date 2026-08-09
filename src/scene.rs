@@ -245,6 +245,42 @@ impl Scene {
         // Structural checks first. Everything below rasterizes the shapes and
         // looks materials up by the index it finds, so a dangling reference has
         // to be reported here rather than panicking three lines later.
+        //
+        // The table invariants cannot be broken through the API -- `push`
+        // never touches slot 0 -- but a scene file states the table in text.
+        if self.materials.is_empty() {
+            return Err("the material table is empty; slot 0 must be vacuum".to_string());
+        }
+        if self.materials.get(0) != Material::VACUUM {
+            return Err(
+                "material 0 must be vacuum: every unpainted cell wears index 0".to_string(),
+            );
+        }
+        // Mirrors what the absorber's constructor will panic over. Catching it
+        // here means "this scene cannot run at this resolution" arrives as a
+        // report instead of detonating inside `Simulation::new` -- which is
+        // how a scene that validates at its native resolution used to fail
+        // after `with_resolution` coarsened it.
+        if let Boundary::Absorbing {
+            thickness,
+            target_reflection,
+        } = self.boundary
+        {
+            for (axis, &cells) in self.grid.extent.as_array().iter().enumerate() {
+                if 2 * thickness as usize >= cells {
+                    return Err(format!(
+                        "absorbing layers {thickness} cells thick meet in the middle of \
+                         axis {axis}, which is only {cells} cells across; thin the layer \
+                         or raise the resolution"
+                    ));
+                }
+            }
+            if !(target_reflection > 0.0 && target_reflection < 1.0) {
+                return Err(format!(
+                    "target reflection {target_reflection} must lie in (0, 1)"
+                ));
+            }
+        }
         for shape in self.shapes.iter() {
             if shape.material() as usize >= self.materials.len() {
                 return Err(format!(
@@ -444,9 +480,12 @@ mod tests {
 
     #[test]
     fn empty_scene_is_all_vacuum() {
-        let scene = Scene::empty(Extent::cube(8), 1e-3);
+        // 24 cells, not fewer: the default boundary is a ten-cell absorbing
+        // layer per wall, and validation now checks that it fits -- on the
+        // old eight-cell domain this scene validated and could not run.
+        let scene = Scene::empty(Extent::cube(24), 1e-3);
         let indices = scene.material_indices();
-        assert_eq!(indices.len(), 8 * 8 * 8);
+        assert_eq!(indices.len(), 24 * 24 * 24);
         assert!(indices.iter().all(|&i| i == MaterialTable::VACUUM));
         assert_eq!(scene.validate(), Ok(()));
     }
@@ -511,7 +550,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_a_dangling_material_reference() {
-        let mut scene = Scene::empty(Extent::cube(8), 1e-3);
+        let mut scene = Scene::empty(Extent::cube(24), 1e-3);
         scene.shapes.push(Shape::Block {
             center: [0.0; 3],
             size: [2e-3; 3],
@@ -609,6 +648,30 @@ mod tests {
         ));
         let error = scene.validate().unwrap_err();
         assert!(error.contains("outside"), "{error}");
+    }
+
+    #[test]
+    fn validation_catches_an_absorber_that_does_not_fit() {
+        // Two ten-cell layers meet in the middle of a nineteen-cell axis.
+        // This used to validate cleanly and then panic in `Simulation::new`,
+        // which is exactly how a scene that runs fine at its native
+        // resolution failed after `with_resolution` coarsened it.
+        let scene = Scene::empty(Extent::cube(19), 1e-3).with_boundary(Boundary::Absorbing {
+            thickness: 10,
+            target_reflection: 1e-6,
+        });
+        let error = scene.validate().unwrap_err();
+        assert!(error.contains("thick"), "{error}");
+    }
+
+    #[test]
+    fn validation_catches_a_nonsense_target_reflection() {
+        let scene = Scene::empty(Extent::cube(32), 1e-3).with_boundary(Boundary::Absorbing {
+            thickness: 8,
+            target_reflection: 0.0,
+        });
+        let error = scene.validate().unwrap_err();
+        assert!(error.contains("reflection"), "{error}");
     }
 
     #[test]
