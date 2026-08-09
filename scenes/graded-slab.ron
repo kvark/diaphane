@@ -17,8 +17,8 @@
 //
 // Watch: the packet arriving from the left, and a reflection racing back out
 // off a film far thinner than the wave that sees it. The change of cell size is
-// measured to reflect below -40 dB, so what comes back is the film and not the
-// mesh.
+// measured to reflect at -32.5 dB, the film itself at around -17 dB, so what
+// comes back is the film and not the mesh -- by a factor of about thirty.
 //
 // Try:
 //   cargo viz --scene scenes/graded-slab.ron --warmup 240 --mode electric

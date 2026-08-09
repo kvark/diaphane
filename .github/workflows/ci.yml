@@ -62,16 +62,21 @@ jobs:
       # `--no-default-features` is the point: the visualizer is an example, so
       # `winit`, `png` and the whole egui stack are dev-dependencies, so there
       # is no feature anyone can turn on that puts a window system or a UI
-      # toolkit into a graph depending on this crate. `--all-features` is also
-      # what docs.rs builds with.
+      # toolkit into a graph depending on this crate. It is also what docs.rs
+      # is told to build with, in the package metadata.
+      #
+      # `shell: bash` because GitHub's default run shell omits pipefail: if
+      # `cargo tree` itself failed, the grep would scan empty input, find
+      # nothing, and pass the step vacuously.
       - name: Check that the library is still headless
+        shell: bash
         run: |
           cargo build --no-default-features
           ! cargo tree --all-features -e normal | grep -qE '\bwinit\b|\bpng\b|\begui\b'
 
       - name: Render an animation offscreen
-        # Exercises the GIF encoder as well as the render path, since the
-        # README's animation is made by exactly this command.
+        # Exercises the GIF encoder as well as the render path -- the README's
+        # animation comes from the same code, at friendlier settings.
         run: |
           cargo render --frames 4 --extent 48 --steps 5 --size 240x180 \
             --gif frames/motion.gif
@@ -94,9 +99,11 @@ jobs:
             | tee /tmp/viz.log
           # A panel that silently stops drawing looks exactly like one that is
           # drawing correctly, from out here. Nothing under a virtual display
-          # would notice, so the primitive count is the assertion.
+          # would notice, so the primitive count is the assertion. The word
+          # boundary matters: without it, a legitimate count of 10 matches
+          # "0 panel primitives" and fails an honest run.
           grep -qE 'panel primitives' /tmp/viz.log
-          ! grep -qE '0 panel primitives' /tmp/viz.log
+          ! grep -qE '\b0 panel primitives' /tmp/viz.log
 
       - name: Photograph the window
         # The count above says the panel tessellated something. It cannot say
@@ -118,7 +125,11 @@ jobs:
             wait 2>/dev/null || true'
           python3 .github/scripts/xwd-to-png.py /tmp/window.xwd frames/window.png
 
+      # `always()` because the screenshot is a debugging aid: it is most
+      # needed exactly when an earlier step failed, which is when the default
+      # condition would throw it away.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: rendered-frames-and-window
           path: frames/

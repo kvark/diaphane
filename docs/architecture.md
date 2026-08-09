@@ -201,8 +201,8 @@ A binary target's dependencies are the *library's* dependencies. Putting the
 viewer in a `[[bin]]` with `required-features = ["viz"]` keeps `winit` out of a
 default build, but it is still declared on the crate: it shows up as a feature
 on docs.rs and crates.io, `cargo add diaphane --features viz` pulls a window
-system into someone else's dependency graph, and `--all-features` — which is
-what docs.rs builds with — pulls it into ours. An example's dependencies are
+system into someone else's dependency graph, and `--all-features` — which
+docs.rs is told to build with — pulls it into ours. An example's dependencies are
 **dev**-dependencies, which are the one kind cargo does not propagate to
 consumers at all. So `winit` and `png` sit there, the manifest's
 `[dependencies]` is four crates and a window system is not expressible:
