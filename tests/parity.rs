@@ -241,6 +241,63 @@ fn a_graded_grid_is_graded_the_same_way_on_the_gpu() {
 }
 
 #[test]
+fn time_reversal_matches_between_the_solvers() {
+    // A reversible scattering scene: a glass ball in a conducting box. The
+    // packet shatters against the ball, then both solvers run the film
+    // backwards -- the GPU with its direction uniform, the CPU with its
+    // hand-inverted sweeps -- and they have to land on the same past.
+    let mut scene = Scene::empty(Extent::new(40, 36, 36), 1e-3).with_boundary(Boundary::Pec);
+    let frequency = scene.grid.frequency_for_resolution(24.0);
+    let glass = scene.materials.push(Material::refractive(2.0));
+    scene.shapes.push(Shape::Sphere {
+        center: [4e-3, 0.0, 0.0],
+        radius: 6e-3,
+        material: glass,
+    });
+    let scene = scene.with_source(Source::point(
+        [-12e-3, 0.0, 0.0],
+        Axis::Z,
+        Waveform::ricker(frequency),
+    ));
+    scene.validate().unwrap();
+    assert!(scene.is_reversible());
+
+    let context = match headless_context() {
+        Ok(context) => context,
+        Err(error) => {
+            eprintln!("skipping: no usable GPU device ({error})");
+            return;
+        }
+    };
+    let mut reference = cpu::Simulation::new(&scene);
+    let mut candidate = gpu::Simulation::new(context, &scene);
+    reference.advance_by(220);
+    candidate.advance_by(220);
+    reference.reverse_by(140);
+    candidate.reverse_by(140);
+    assert_eq!(reference.step_count(), candidate.step_count());
+    assert!(reference.is_finite());
+
+    let steps = 220 + 140;
+    let electric = candidate.read_electric();
+    let magnetic = candidate.read_magnetic();
+    assert_field_parity(
+        "E",
+        Axis::ALL.map(|axis| reference.electric(axis)),
+        Axis::ALL.map(|axis| candidate.component(&electric, axis)),
+        steps,
+        1e-4,
+    );
+    assert_field_parity(
+        "H",
+        Axis::ALL.map(|axis| reference.magnetic(axis)),
+        Axis::ALL.map(|axis| candidate.component(&magnetic, axis)),
+        steps,
+        1e-4,
+    );
+}
+
+#[test]
 fn resetting_clears_the_device_buffers() {
     let Ok(context) = headless_context() else {
         eprintln!("skipping: no usable GPU device");

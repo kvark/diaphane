@@ -54,7 +54,9 @@ struct Params {
     source_extent: [u32; 4],
     /// Apodization centre `xyz`, then `1/waist²`.
     source_shape: [f32; 4],
-    /// `amplitude · waveform(t)`, then padding.
+    /// `amplitude · waveform(t)`, then the direction of time: `+1.0` steps
+    /// forward, `-1.0` undoes a step. See the WGSL side for why one number
+    /// is the entire reversal feature.
     source_drive: [f32; 4],
 }
 
@@ -101,6 +103,9 @@ pub struct Simulation {
     field_bytes: u64,
     lookup_samples: u32,
     step: u64,
+    /// Decided once from the scene, because [`Self::reverse_by`] must refuse
+    /// a lossy scene for the same reason the CPU solver does.
+    reversible: bool,
 }
 
 impl Simulation {
@@ -247,6 +252,7 @@ impl Simulation {
             field_bytes,
             lookup_samples,
             step: 0,
+            reversible: scene.is_reversible(),
         }
     }
 
@@ -332,7 +338,8 @@ impl Simulation {
         {
             let mut pass = encoder.compute("advance");
             for _ in 0..steps {
-                params.source_drive = [0.0; 4];
+                // `y` is the direction of time; the update kernels read it.
+                params.source_drive = [0.0, 1.0, 0.0, 0.0];
                 {
                     let mut encoder = pass.with(&pipelines.magnetic);
                     encoder.bind(0, &FieldData::new(buffers, *params));
@@ -371,7 +378,7 @@ impl Simulation {
                         injection.center[2],
                         injection.inverse_waist_squared,
                     ];
-                    params.source_drive = [injection.value, 0.0, 0.0, 0.0];
+                    params.source_drive = [injection.value, 1.0, 0.0, 0.0];
 
                     let region = gpu::Extent {
                         width: injection.extent[0] as u32,
@@ -394,6 +401,115 @@ impl Simulation {
                     pass.barrier();
                 }
                 *step += 1;
+            }
+        }
+        self.sync_point = Some(context.submit(encoder));
+    }
+
+    /// Undoes `steps` complete time steps, encoded as one command buffer.
+    ///
+    /// The same involution the CPU solver performs, run by the same kernels:
+    /// with nothing lossy in the scene, the inverse update is the forward
+    /// update with the gain negated and the two half-steps in the opposite
+    /// order, so the `direction` slot of [`Params`] is the entire feature.
+    /// Sources come back out exactly, because a waveform is a pure function
+    /// of time.
+    ///
+    /// Panics on a lossy scene, exactly like [`crate::cpu::Simulation::reverse`]
+    /// and for the same reason: a dissipative update run backwards amplifies
+    /// roundoff exponentially, and returning that would look like a solver
+    /// bug rather than a refusal.
+    pub fn reverse_by(&mut self, steps: u64) {
+        if steps == 0 {
+            return;
+        }
+        assert!(
+            self.reversible,
+            "this scene is lossy, and running a dissipative update backwards \
+             amplifies roundoff exponentially; reversal needs Boundary::Pec \
+             and no conductive material"
+        );
+        assert!(self.step >= steps, "cannot step back past the start");
+        self.wait();
+
+        let Self {
+            ref context,
+            ref buffers,
+            ref pipelines,
+            ref mut encoder,
+            ref grid,
+            ref sources,
+            ref mut params,
+            ref mut step,
+            ..
+        } = *self;
+
+        let extent = gpu::Extent {
+            width: grid.extent.x,
+            height: grid.extent.y,
+            depth: grid.extent.z,
+        };
+        let time_step = grid.time_step();
+
+        encoder.start();
+        {
+            let mut pass = encoder.compute("reverse");
+            for _ in 0..steps {
+                // Forward order is H, E, inject; so backward is un-inject
+                // with the amplitude negated, un-E, un-H.
+                let time = *step as f32 * time_step;
+                for source in sources.iter() {
+                    let injection = source.injection(grid, time);
+                    if injection.value == 0.0 {
+                        continue;
+                    }
+                    params.source_region = [
+                        injection.origin[0] as u32,
+                        injection.origin[1] as u32,
+                        injection.origin[2] as u32,
+                        injection.component as u32,
+                    ];
+                    params.source_extent = [
+                        injection.extent[0] as u32,
+                        injection.extent[1] as u32,
+                        injection.extent[2] as u32,
+                        0,
+                    ];
+                    params.source_shape = [
+                        injection.center[0],
+                        injection.center[1],
+                        injection.center[2],
+                        injection.inverse_waist_squared,
+                    ];
+                    params.source_drive = [-injection.value, -1.0, 0.0, 0.0];
+
+                    let region = gpu::Extent {
+                        width: injection.extent[0] as u32,
+                        height: injection.extent[1] as u32,
+                        depth: injection.extent[2] as u32,
+                    };
+                    {
+                        let mut encoder = pass.with(&pipelines.inject);
+                        encoder.bind(0, &FieldData::new(buffers, *params));
+                        encoder.dispatch(pipelines.inject.get_dispatch_for(region));
+                    }
+                    pass.barrier();
+                }
+
+                params.source_drive = [0.0, -1.0, 0.0, 0.0];
+                {
+                    let mut encoder = pass.with(&pipelines.electric);
+                    encoder.bind(0, &FieldData::new(buffers, *params));
+                    encoder.dispatch(pipelines.electric.get_dispatch_for(extent));
+                }
+                pass.barrier();
+                {
+                    let mut encoder = pass.with(&pipelines.magnetic);
+                    encoder.bind(0, &FieldData::new(buffers, *params));
+                    encoder.dispatch(pipelines.magnetic.get_dispatch_for(extent));
+                }
+                pass.barrier();
+                *step -= 1;
             }
         }
         self.sync_point = Some(context.submit(encoder));
