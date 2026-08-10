@@ -23,6 +23,10 @@
 //
 // Try:
 //   cargo viz --scene scenes/double-slit.ron --mode electric --warmup 330 --gain 3.5
+//
+// And the textbook picture: the time-averaged intensity, where the fringes
+// stop shimmering and stand still --
+//   cargo render --scene scenes/double-slit.ron --warmup 200 --frames 3 --steps 250 --mode intensity
 
 Scene(
     grid: Grid(

@@ -9,7 +9,7 @@ use crate::{
     boundary::Boundary,
     grid::{Axis, Extent, Grid, SPEED_OF_LIGHT},
     material::{Material, MaterialTable},
-    source::{Source, Waveform},
+    source::{Source, SourceShape, Waveform},
 };
 
 /// Cell size the built-in presets are defined at: one millimetre.
@@ -323,6 +323,25 @@ impl Scene {
             }
         }
         for source in self.sources.iter() {
+            if let SourceShape::PlaneWave { axis, .. } = source.shape {
+                if source.polarization == axis {
+                    return Err(format!(
+                        "a plane wave travelling along {axis:?} cannot be polarized \
+                         along it; light is transverse"
+                    ));
+                }
+                // The one-way cancellation is phase-matched to one spacing:
+                // the correction rows replay the incident wave at the grid's
+                // own phase velocity, and a graded travel axis has several.
+                if self.grid.spacing(axis).worst_ratio() > 1.0 + 1e-6 {
+                    return Err(format!(
+                        "a plane wave needs a uniform grid along its travel axis, \
+                         but {axis:?} is graded; keep refinements off that axis"
+                    ));
+                }
+            }
+        }
+        for source in self.sources.iter() {
             let position = source.position();
             if !self.grid.contains(position) {
                 let size = self.grid.size();
@@ -618,8 +637,8 @@ mod tests {
         ));
         let fine = scene.with_resolution(2000.0);
 
-        let coarse_cell = scene.sources[0].injection(&scene.grid, 0.0).origin;
-        let fine_cell = fine.sources[0].injection(&fine.grid, 0.0).origin;
+        let coarse_cell = scene.sources[0].injections(&scene.grid, 0.0)[0].origin;
+        let fine_cell = fine.sources[0].injections(&fine.grid, 0.0)[0].origin;
         // Same place in metres means twice the cell index at twice the
         // resolution, to within the cell the position falls in.
         for axis in 0..3 {

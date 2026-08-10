@@ -59,6 +59,12 @@ const MODE_GRID: u32 = 5u;
 // amplitude along the direction each field points is what turns a direction
 // into something with a place.
 const MODE_RIBBONS: u32 = 6u;
+
+// Σ|E|²/steps, read from the solver's accumulator: what a slow detector --
+// film, a screen, an eye -- integrates. Interference that shimmers in every
+// instantaneous view stands still here, which is what makes the double slit's
+// fringes look like the textbook drew them.
+const MODE_INTENSITY: u32 = 7u;
 // Signed Ez and Hz at once, in two hues. The default, because it is the only
 // view in which the two fields are separately visible: the energy densities of
 // a travelling wave are *equal* (that is equipartition, and there is a test for
@@ -79,6 +85,9 @@ var<storage, read_write> peak: array<atomic<u32>>;
 // Inverse of the cumulative cell width: three sections of `box_size.w`
 // samples, each giving a fractional cell coordinate. See `Grid::cell_lookup`.
 var<storage, read> lookup: array<f32>;
+// Running Σ|E|² per cell, borrowed from the solver; `view.components.z`
+// holds the step count that normalizes it.
+var<storage, read> intensity: array<f32>;
 var<uniform> view: ViewParams;
 
 /// World position, in coarse cells, to a fractional cell coordinate.
@@ -363,8 +372,18 @@ fn ribbons(cell: vec3<f32>, exposure: f32) -> vec3<f32> {
 /// Colour of a cell boundary in [`MODE_GRID`]. Dim, because a ray crosses many.
 const GRID_TINT: vec3<f32> = vec3<f32>(0.16, 0.19, 0.26);
 
+/// The time-averaged |E|² at a cell, normalized by the steps summed so far.
+fn averaged_intensity(coord: vec3<u32>) -> f32 {
+    return intensity[cell_index(coord)] / f32(max(view.components.z, 1u));
+}
+
+const INTENSITY_TINT: vec3<f32> = vec3<f32>(1.0, 0.8, 0.45);
+
 /// Emitted colour per unit length at a cell, for the additive views.
 fn emission(coord: vec3<u32>, mode: u32, exposure: f32, log_strength: f32) -> vec3<f32> {
+    if mode == MODE_INTENSITY {
+        return signed_log(averaged_intensity(coord) * exposure, log_strength) * INTENSITY_TINT;
+    }
     let pair = densities(coord) * exposure;
     if mode == MODE_MAGNITUDE {
         return vec3<f32>(signed_log(pair.x + pair.y, log_strength));
@@ -468,4 +487,7 @@ fn measure_peak(@builtin(global_invocation_id) global_id: vec3<u32>) {
         atomicMax(&peak[1u + component], bitcast<u32>(both.x));
         atomicMax(&peak[4u + component], bitcast<u32>(both.y));
     }
+    // The averaged intensity ranges itself: its peak sits wherever the
+    // fringes are brightest, not where the instantaneous field peaks.
+    atomicMax(&peak[7u], bitcast<u32>(averaged_intensity(global_id)));
 }

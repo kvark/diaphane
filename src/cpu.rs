@@ -85,6 +85,11 @@ pub struct Simulation {
     /// on a kernel that is waiting for memory anyway.
     ones: Vec<f32>,
     absorber: AbsorbingProfile,
+    /// Running Σ|E|² per cell -- what a detector integrates -- summed only
+    /// while [`Self::set_accumulate_intensity`] is on.
+    intensity: Vec<f32>,
+    accumulating: bool,
+    accumulated: u64,
     sources: Vec<Source>,
     step: u64,
 }
@@ -105,6 +110,9 @@ impl Simulation {
             magnetic_gains: Axis::ALL.map(|axis| scene.grid.magnetic_gains(axis)),
             electric_gains: Axis::ALL.map(|axis| scene.grid.electric_gains(axis)),
             ones: vec![1.0; scene.grid.extent.x as usize],
+            intensity: vec![0.0; scene.grid.extent.total()],
+            accumulating: false,
+            accumulated: 0,
             absorber: AbsorbingProfile::new(&scene.grid, scene.boundary),
             sources: scene.sources.clone(),
             step: 0,
@@ -157,16 +165,35 @@ impl Simulation {
             self.electric[axis].fill(0.0);
             self.magnetic[axis].fill(0.0);
         }
+        self.intensity.fill(0.0);
+        self.accumulated = 0;
         self.step = 0;
     }
 
     /// Advances one full time step.
     pub fn advance(&mut self) {
-        self.update_magnetic();
-        self.update_electric();
-        // `E` now holds time `(step + 1)·Δt`, which is when the source acts.
+        // `E` will hold `(step + 1)·Δt` after its update; injections state
+        // their times relative to that instant.
         let time = (self.step + 1) as f32 * self.grid.time_step();
-        self.inject(time);
+        self.update_magnetic();
+        // Magnetic injections land *between* the two half-updates: a plane
+        // wave's scattered-side correction has to be in place before the
+        // electric update reads the row it repairs, or the two rows next to
+        // it ingest a half-step of incident field they must never see.
+        self.apply_sources(time, 1.0, true);
+        self.update_electric();
+        self.apply_sources(time, 1.0, false);
+        if self.accumulating {
+            // `E` is complete for this step; add its square in.
+            for (index, slot) in self.intensity.iter_mut().enumerate() {
+                let mut sum = 0.0;
+                for component in self.electric.iter() {
+                    sum += component[index] * component[index];
+                }
+                *slot += sum;
+            }
+            self.accumulated += 1;
+        }
         self.step += 1;
     }
 
@@ -232,10 +259,15 @@ impl Simulation {
         );
         assert!(self.step > 0, "cannot step back past the start");
 
-        // Forward order is H, E, inject; so backward is un-inject, un-E, un-H.
+        // A sum over steps that are about to be un-stepped is not an average
+        // of anything; reversal restarts the accumulation.
+        self.clear_intensity();
+        // Forward order is H, inject-H, E, inject-E; backward is each of them
+        // undone in the opposite order.
         let time = self.step as f32 * self.grid.time_step();
-        self.retract(time);
+        self.apply_sources(time, -1.0, false);
         self.reverse_electric();
+        self.apply_sources(time, -1.0, true);
         self.reverse_magnetic();
         self.step -= 1;
     }
@@ -539,36 +571,61 @@ impl Simulation {
         }
     }
 
-    /// Adds every source into `E`. Additive, never assigning — see
-    /// [`crate::source`].
-    fn inject(&mut self, time: f32) {
-        self.apply_sources(time, 1.0);
+    /// Turns per-step intensity accumulation on or off; turning it on starts
+    /// a fresh average. Mirrors the GPU solver's switch, and the parity suite
+    /// holds the two to the same sums.
+    pub fn set_accumulate_intensity(&mut self, on: bool) {
+        if on && !self.accumulating {
+            self.clear_intensity();
+        }
+        self.accumulating = on;
     }
 
-    /// Takes them back out again, for [`Self::reverse`]. Exact, because a
-    /// waveform is a pure function of time.
-    fn retract(&mut self, time: f32) {
-        self.apply_sources(time, -1.0);
+    /// The running `Σ|E|²` per cell. Divide by [`Self::accumulated_steps`].
+    pub fn intensity(&self) -> &[f32] {
+        &self.intensity
     }
 
-    fn apply_sources(&mut self, time: f32, sign: f32) {
+    pub fn accumulated_steps(&self) -> u64 {
+        self.accumulated
+    }
+
+    fn clear_intensity(&mut self) {
+        if self.accumulated > 0 {
+            self.intensity.fill(0.0);
+            self.accumulated = 0;
+        }
+    }
+
+    /// Applies one phase of every source's injections. Additive, never
+    /// assigning — see [`crate::source`] — and exactly retractable with
+    /// `sign = -1.0`, because a waveform is a pure function of time.
+    ///
+    /// `magnetic` selects the phase: magnetic-targeted injections run between
+    /// the two half-updates, electric ones after both.
+    fn apply_sources(&mut self, time: f32, sign: f32, magnetic: bool) {
         for source in self.sources.iter() {
-            let injection = source.injection(&self.grid, time);
-            if injection.value == 0.0 {
-                continue;
-            }
-            let value = sign * injection.value;
-            let target = &mut self.electric[injection.component];
-            for dz in 0..injection.extent[2] {
-                for dy in 0..injection.extent[1] {
-                    for dx in 0..injection.extent[0] {
-                        let coord = [
-                            injection.origin[0] + dx,
-                            injection.origin[1] + dy,
-                            injection.origin[2] + dz,
-                        ];
-                        target[self.grid.extent.index(coord)] +=
-                            value * injection.weight(self.grid.cell_center(coord));
+            for injection in source.injections(&self.grid, time) {
+                if injection.value == 0.0 || injection.magnetic != magnetic {
+                    continue;
+                }
+                let value = sign * injection.value;
+                let target = if injection.magnetic {
+                    &mut self.magnetic[injection.component]
+                } else {
+                    &mut self.electric[injection.component]
+                };
+                for dz in 0..injection.extent[2] {
+                    for dy in 0..injection.extent[1] {
+                        for dx in 0..injection.extent[0] {
+                            let coord = [
+                                injection.origin[0] + dx,
+                                injection.origin[1] + dy,
+                                injection.origin[2] + dz,
+                            ];
+                            target[self.grid.extent.index(coord)] +=
+                                value * injection.weight(self.grid.cell_center(coord));
+                        }
                     }
                 }
             }
@@ -678,6 +735,8 @@ impl Steppable for Simulation {
     }
 
     fn restore(&mut self, snapshot: &Snapshot) {
+        // The average belongs to the history that was just abandoned.
+        self.clear_intensity();
         let cells = self.grid.extent.total();
         assert_eq!(
             snapshot.electric.len(),

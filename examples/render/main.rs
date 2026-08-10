@@ -10,7 +10,7 @@ mod common;
 
 use crate::common::{
     options::{Args, COMMON_HELP, Common, TIMEOUT_MS, init_logging},
-    render::{Animation, Capture, Renderer, ScrubBar},
+    render::{Animation, Capture, Renderer, ScrubBar, ViewMode},
 };
 use blade_graphics as gpu;
 use diaphane::gpu::Simulation;
@@ -156,6 +156,9 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
         );
     }
     let mut simulation = Simulation::new(Arc::clone(&context), &scene);
+    // Before the warmup, so `--mode intensity` averages over it too -- the
+    // whole point of the view is a long integration.
+    simulation.set_accumulate_intensity(options.common.settings.mode == ViewMode::Intensity);
     let mut renderer = Renderer::new(Arc::clone(&context), Capture::FORMAT);
     let mut capture = Capture::new(
         Arc::clone(&context),

@@ -372,6 +372,63 @@ fn a_closed_conducting_box_conserves_energy() {
 }
 
 #[test]
+fn a_plane_wave_source_is_one_way() {
+    // The total-field/scattered-field corrections replay the incident wave at
+    // the grid's own numerical phase velocity, so everything radiated
+    // backward should cancel. "Should" is measured here: the wave crosses the
+    // total region at full strength while the scattered region behind the
+    // injection plane stays quiet.
+    //
+    // What the floor actually is: aperture physics, not injector error. The
+    // correction rows span a finite cross-section truncated by the side
+    // absorbers, and a truncated plane wave diffracts -- the grazing side
+    // layers scatter the incident wave continuously, and some of that
+    // radiates backward through the plane. That backwash is real scattered
+    // field of the finite configuration, measured here around -30 dB. The
+    // injector's own cancellation sits below it; the measurement is sensitive
+    // enough to know, because deferring the magnetic correction by half a
+    // step -- the mistake this test caught -- raised the floor to -21 dB.
+    let mut scene = Scene::empty(Extent::new(120, 32, 32), 1e-3);
+    let frequency = scene.grid.frequency_for_resolution(20.0);
+    scene.sources.push(Source::plane_wave(
+        Axis::X,
+        -0.020,
+        Axis::Z,
+        Waveform::gaussian_pulse(frequency, 4.0),
+    ));
+    scene.validate().unwrap();
+
+    let mut simulation = cpu::Simulation::new(&scene);
+    let plane = 40usize; // cell of x = -20 mm in a 120-cell axis
+    let mut total_peak = 0.0f32;
+    let mut scattered_peak = 0.0f32;
+    for _ in 0..900 {
+        simulation.advance();
+        let ez = simulation.electric(Axis::Z);
+        // On-axis columns, ten cells clear of the plane on each side and of
+        // the absorbing walls, so neither region's number is edge backwash.
+        for x in 12..plane - 10 {
+            scattered_peak = scattered_peak.max(ez[scene.grid.extent.index([x, 16, 16])].abs());
+        }
+        for x in plane + 10..108 {
+            total_peak = total_peak.max(ez[scene.grid.extent.index([x, 16, 16])].abs());
+        }
+    }
+
+    // The launched wave is the waveform at unit amplitude, within what
+    // diffraction of the finite aperture does to an on-axis measurement.
+    assert!(
+        (0.8..1.25).contains(&total_peak),
+        "incident peak {total_peak} is not the waveform's"
+    );
+    let leak = 20.0 * (scattered_peak / total_peak).log10();
+    assert!(
+        leak < -25.0,
+        "the plane wave leaks {leak:.1} dB backward ({scattered_peak:e} of {total_peak:e})"
+    );
+}
+
+#[test]
 fn a_conducting_box_cannot_tell_its_low_walls_from_its_high_ones() {
     // A pulse launched from the exact centre of a cubic PEC box has no way to
     // tell the wall at -L/2 from the wall at +L/2 -- unless the two implement

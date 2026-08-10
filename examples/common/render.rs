@@ -40,10 +40,14 @@ pub enum ViewMode {
     /// The only view that shows the two fields at right angles, and it has to
     /// be a graph to do it — see the note on `MODE_RIBBONS` in the shader.
     Ribbons,
+    /// Time-averaged `|E|²` — what a detector integrates. The solver
+    /// accumulates it only while this view is up, so every other mode costs
+    /// nothing; switching to it starts a fresh average.
+    Intensity,
 }
 
 impl ViewMode {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Fields,
         Self::Energy,
         Self::Electric,
@@ -51,6 +55,7 @@ impl ViewMode {
         Self::Magnitude,
         Self::Grid,
         Self::Ribbons,
+        Self::Intensity,
     ];
 
     pub fn label(self) -> &'static str {
@@ -65,6 +70,7 @@ impl ViewMode {
             Self::Magnitude => "total energy",
             Self::Grid => "the grid",
             Self::Ribbons => "E and H as ribbons",
+            Self::Intensity => "time-averaged intensity",
         }
     }
 
@@ -77,6 +83,7 @@ impl ViewMode {
             Self::Magnitude => 3.0,
             Self::Grid => 5.0,
             Self::Ribbons => 6.0,
+            Self::Intensity => 7.0,
         }
     }
 
@@ -88,7 +95,7 @@ impl ViewMode {
             // deflection, blowing the ribbons into planes in quiet scenes and
             // collapsing them in loud ones.
             Self::Electric | Self::Magnetic | Self::Ribbons => true,
-            Self::Energy | Self::Magnitude | Self::Grid => false,
+            Self::Energy | Self::Magnitude | Self::Grid | Self::Intensity => false,
             Self::Fields => true,
         }
     }
@@ -191,6 +198,7 @@ struct VolumeData {
     magnetic: gpu::BufferPiece,
     peak: gpu::BufferPiece,
     lookup: gpu::BufferPiece,
+    intensity: gpu::BufferPiece,
     view: ViewParams,
 }
 
@@ -270,7 +278,7 @@ impl Renderer {
     /// the measured peak over roughly a hundred frames, so the image goes on
     /// "developing" with the field frozen. That reads as the simulation still
     /// running, which is the one thing a pause has to rule out.
-    fn update_scale(&mut self, advanced: bool) {
+    fn update_scale(&mut self, advanced: bool, mode: ViewMode) {
         if !advanced {
             return;
         }
@@ -279,7 +287,14 @@ impl Renderer {
         let slots: [f32; PEAK_SLOTS] = std::array::from_fn(|slot| {
             f32::from_bits(unsafe { self.peak.data().cast::<u32>().add(slot).read_unaligned() })
         });
-        let measured = slots[0];
+        // The averaged intensity ranges itself: its peak lives where the
+        // fringes are brightest, which over a long average can sit far from
+        // the instantaneous energy peak the other views expose against.
+        let measured = if mode == ViewMode::Intensity {
+            slots[7]
+        } else {
+            slots[0]
+        };
         // Whichever component carries the most field is the one worth drawing.
         // Taken from the same reduction the exposure comes from, so it costs
         // nothing extra and tracks a scene whose polarization is not obvious.
@@ -328,6 +343,7 @@ impl Renderer {
         } else {
             settings.gain / reference
         };
+        let accumulated = simulation.accumulated_steps().min(u64::from(u32::MAX)) as u32;
         ViewParams {
             extent: [extent.x, extent.y, extent.z, extent.total() as u32],
             box_size: [
@@ -350,7 +366,7 @@ impl Renderer {
                 basis.forward[2],
                 settings.mode.code(),
             ],
-            components: [self.components[0], self.components[1], 0, 0],
+            components: [self.components[0], self.components[1], accumulated, 0],
             tone: match settings.scrub {
                 Some(scrub) => [
                     1.0 / reference_path(box_size),
@@ -371,14 +387,16 @@ impl Renderer {
     /// and submit before their first [`Self::draw`].
     pub fn measure(&mut self, encoder: &mut gpu::CommandEncoder, simulation: &Simulation) {
         let extent = simulation.grid().extent;
+        let accumulated = simulation.accumulated_steps().min(u64::from(u32::MAX)) as u32;
         let data = VolumeData {
             electric: simulation.electric_buffer(),
             magnetic: simulation.magnetic_buffer(),
             peak: self.peak.into(),
             lookup: simulation.lookup_buffer(),
+            intensity: simulation.intensity_buffer(),
             view: ViewParams {
                 extent: [extent.x, extent.y, extent.z, extent.total() as u32],
-                components: [self.components[0], self.components[1], 0, 0],
+                components: [self.components[0], self.components[1], accumulated, 0],
                 ..Default::default()
             },
         };
@@ -410,7 +428,7 @@ impl Renderer {
         settings: &ViewSettings,
         advanced: bool,
     ) {
-        self.update_scale(advanced);
+        self.update_scale(advanced, settings.mode);
         self.measure(encoder, simulation);
 
         // One sample per cell along the ray is enough at the resolutions the
@@ -421,6 +439,7 @@ impl Renderer {
             magnetic: simulation.magnetic_buffer(),
             peak: self.peak.into(),
             lookup: simulation.lookup_buffer(),
+            intensity: simulation.intensity_buffer(),
             view: self.params(simulation, settings, size, march),
         };
 
@@ -456,7 +475,7 @@ impl Renderer {
 
 /// Slots in the reduction buffer: the energy peak, then `|E|` and `|H|` per
 /// component.
-const PEAK_SLOTS: usize = 7;
+const PEAK_SLOTS: usize = 8;
 
 /// Path length, in cells, over which a feature at the top of the range
 /// accumulates to full brightness.

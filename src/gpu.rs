@@ -33,7 +33,7 @@ use crate::{
     boundary::AbsorbingProfile,
     grid::{Axis, Grid},
     scene::Scene,
-    source::Source,
+    source::{Injection, Source},
     timeline::{Snapshot, Steppable},
 };
 use blade_graphics as gpu;
@@ -61,6 +61,13 @@ struct Params {
 }
 
 #[derive(blade_macros::ShaderData)]
+struct IntensityData {
+    electric: gpu::BufferPiece,
+    intensity: gpu::BufferPiece,
+    params: Params,
+}
+
+#[derive(blade_macros::ShaderData)]
 struct FieldData {
     electric: gpu::BufferPiece,
     magnetic: gpu::BufferPiece,
@@ -75,6 +82,60 @@ struct Pipelines {
     magnetic: gpu::ComputePipeline,
     electric: gpu::ComputePipeline,
     inject: gpu::ComputePipeline,
+    intensity: gpu::ComputePipeline,
+}
+
+/// Encodes one injection into an open compute pass: uniforms, a dispatch over
+/// the affected region, and the barrier ordering it against whatever reads
+/// the field next. The forward and reverse paths share it; `direction` is the
+/// sign of time, and the drive flips with it so retraction is exact. The
+/// caller's `params.source_drive.y` — which the update kernels read as the
+/// direction — is left equal to `direction`.
+fn encode_injection(
+    pass: &mut gpu::ComputeCommandEncoder<'_>,
+    pipelines: &Pipelines,
+    buffers: &Buffers,
+    params: &mut Params,
+    injection: &Injection,
+    direction: f32,
+) {
+    params.source_region = [
+        injection.origin[0] as u32,
+        injection.origin[1] as u32,
+        injection.origin[2] as u32,
+        injection.component as u32,
+    ];
+    params.source_extent = [
+        injection.extent[0] as u32,
+        injection.extent[1] as u32,
+        injection.extent[2] as u32,
+        injection.magnetic as u32,
+    ];
+    params.source_shape = [
+        injection.center[0],
+        injection.center[1],
+        injection.center[2],
+        injection.inverse_waist_squared,
+    ];
+    params.source_drive = [direction * injection.value, direction, 0.0, 0.0];
+
+    let region = gpu::Extent {
+        width: injection.extent[0] as u32,
+        height: injection.extent[1] as u32,
+        depth: injection.extent[2] as u32,
+    };
+    // The pipeline context is scoped so it is dropped before the barrier. On
+    // Metal it carries a `Drop` that ends the encoding, so holding it across
+    // another `pass` call is a borrow error there — while on Vulkan the same
+    // code compiles happily. Backend-specific borrow behaviour is invisible
+    // until the other platform builds it.
+    {
+        let mut encoder = pass.with(&pipelines.inject);
+        encoder.bind(0, &FieldData::new(buffers, *params));
+        encoder.dispatch(pipelines.inject.get_dispatch_for(region));
+    }
+    // Sources may overlap, and each dispatch reads what the previous wrote.
+    pass.barrier();
 }
 
 struct Buffers {
@@ -86,6 +147,10 @@ struct Buffers {
     geometry: gpu::Buffer,
     /// World-to-cell lookup, for a renderer marching a graded grid.
     lookup: gpu::Buffer,
+    /// Running Σ|E|² per cell, fed by `accumulate_intensity` while a viewer
+    /// wants the time-averaged view. Allocated always (one f32 per cell),
+    /// dispatched only on demand.
+    intensity: gpu::Buffer,
     /// Host-visible destination for [`Simulation::read_electric`] and friends.
     readback: gpu::Buffer,
 }
@@ -106,6 +171,10 @@ pub struct Simulation {
     /// Decided once from the scene, because [`Self::reverse_by`] must refuse
     /// a lossy scene for the same reason the CPU solver does.
     reversible: bool,
+    /// Whether each step also accumulates |E|² into the intensity buffer.
+    accumulating: bool,
+    /// Steps summed into the intensity buffer so far; readers divide by it.
+    accumulated: u64,
 }
 
 impl Simulation {
@@ -137,10 +206,16 @@ impl Simulation {
                 compute: shader.at(entry_point),
             })
         };
+        let intensity_layout = <IntensityData as gpu::ShaderData>::layout();
         let pipelines = Pipelines {
             magnetic: pipeline("update_magnetic", "update_magnetic"),
             electric: pipeline("update_electric", "update_electric"),
             inject: pipeline("inject", "inject"),
+            intensity: context.create_compute_pipeline(gpu::ComputePipelineDesc {
+                name: "accumulate_intensity",
+                data_layouts: &[&intensity_layout],
+                compute: shader.at("accumulate_intensity"),
+            }),
         };
 
         let indices = scene.material_indices();
@@ -167,6 +242,7 @@ impl Simulation {
             absorber: device_buffer("absorber profile", byte_size(&absorption)),
             geometry: device_buffer("axis geometry", byte_size(&geometry)),
             lookup: device_buffer("world to cell", byte_size(&lookup)),
+            intensity: device_buffer("intensity", (cell_count * mem::size_of::<f32>()) as u64),
             readback: context.create_buffer(gpu::BufferDesc {
                 name: "readback",
                 size: field_bytes,
@@ -205,6 +281,11 @@ impl Simulation {
             let mut pass = encoder.transfer("upload scene");
             pass.fill_buffer(buffers.electric.into(), field_bytes, 0);
             pass.fill_buffer(buffers.magnetic.into(), field_bytes, 0);
+            pass.fill_buffer(
+                buffers.intensity.into(),
+                (cell_count * mem::size_of::<f32>()) as u64,
+                0,
+            );
             pass.copy_buffer_to_buffer(
                 staging.at(material_at),
                 buffers.material_index.into(),
@@ -253,6 +334,8 @@ impl Simulation {
             lookup_samples,
             step: 0,
             reversible: scene.is_reversible(),
+            accumulating: false,
+            accumulated: 0,
         }
     }
 
@@ -324,6 +407,8 @@ impl Simulation {
             ref sources,
             ref mut params,
             ref mut step,
+            ref accumulating,
+            ref mut accumulated,
             ..
         } = *self;
 
@@ -338,67 +423,59 @@ impl Simulation {
         {
             let mut pass = encoder.compute("advance");
             for _ in 0..steps {
-                // `y` is the direction of time; the update kernels read it.
+                // `y` is the direction of time; the update kernels read it,
+                // and every encoded injection leaves it at `1.0`.
                 params.source_drive = [0.0, 1.0, 0.0, 0.0];
+                // Where `E` will stand after its update; injections state
+                // their own instants relative to it.
+                let time = (*step + 1) as f32 * time_step;
                 {
                     let mut encoder = pass.with(&pipelines.magnetic);
                     encoder.bind(0, &FieldData::new(buffers, *params));
                     encoder.dispatch(pipelines.magnetic.get_dispatch_for(extent));
                 }
                 pass.barrier();
+                // Magnetic injections land *between* the half-updates: a
+                // plane wave's scattered-side correction has to be in place
+                // before the electric update reads the row it repairs, or the
+                // rows beside it ingest incident field they must never see.
+                for source in sources.iter() {
+                    for injection in source.injections(grid, time) {
+                        if injection.value != 0.0 && injection.magnetic {
+                            encode_injection(
+                                &mut pass, pipelines, buffers, params, &injection, 1.0,
+                            );
+                        }
+                    }
+                }
                 {
                     let mut encoder = pass.with(&pipelines.electric);
                     encoder.bind(0, &FieldData::new(buffers, *params));
                     encoder.dispatch(pipelines.electric.get_dispatch_for(extent));
                 }
                 pass.barrier();
-
-                // `E` now holds `(step + 1)·Δt`, which is when the sources act.
-                let time = (*step + 1) as f32 * time_step;
                 for source in sources.iter() {
-                    let injection = source.injection(grid, time);
-                    if injection.value == 0.0 {
-                        continue;
+                    for injection in source.injections(grid, time) {
+                        if injection.value != 0.0 && !injection.magnetic {
+                            encode_injection(
+                                &mut pass, pipelines, buffers, params, &injection, 1.0,
+                            );
+                        }
                     }
-                    params.source_region = [
-                        injection.origin[0] as u32,
-                        injection.origin[1] as u32,
-                        injection.origin[2] as u32,
-                        injection.component as u32,
-                    ];
-                    params.source_extent = [
-                        injection.extent[0] as u32,
-                        injection.extent[1] as u32,
-                        injection.extent[2] as u32,
+                }
+                if *accumulating {
+                    // `E` is complete for this step; add its square in.
+                    let mut encoder = pass.with(&pipelines.intensity);
+                    encoder.bind(
                         0,
-                    ];
-                    params.source_shape = [
-                        injection.center[0],
-                        injection.center[1],
-                        injection.center[2],
-                        injection.inverse_waist_squared,
-                    ];
-                    params.source_drive = [injection.value, 1.0, 0.0, 0.0];
-
-                    let region = gpu::Extent {
-                        width: injection.extent[0] as u32,
-                        height: injection.extent[1] as u32,
-                        depth: injection.extent[2] as u32,
-                    };
-                    // The pipeline context is scoped so it is dropped before
-                    // the barrier. On Metal it carries a `Drop` that ends the
-                    // encoding, so holding it across another `pass` call is a
-                    // borrow error there — while on Vulkan the same code
-                    // compiles happily. Backend-specific borrow behaviour is
-                    // invisible until the other platform builds it.
-                    {
-                        let mut encoder = pass.with(&pipelines.inject);
-                        encoder.bind(0, &FieldData::new(buffers, *params));
-                        encoder.dispatch(pipelines.inject.get_dispatch_for(region));
-                    }
-                    // Sources may overlap, and each dispatch reads what the
-                    // previous one wrote.
-                    pass.barrier();
+                        &IntensityData {
+                            electric: buffers.electric.into(),
+                            intensity: buffers.intensity.into(),
+                            params: *params,
+                        },
+                    );
+                    encoder.dispatch(pipelines.intensity.get_dispatch_for(extent));
+                    *accumulated += 1;
                 }
                 *step += 1;
             }
@@ -430,6 +507,9 @@ impl Simulation {
              and no conductive material"
         );
         assert!(self.step >= steps, "cannot step back past the start");
+        // A sum over steps that are about to be un-stepped is not an average
+        // of anything; reversal restarts the accumulation.
+        self.clear_intensity();
         self.wait();
 
         let Self {
@@ -455,54 +535,34 @@ impl Simulation {
         {
             let mut pass = encoder.compute("reverse");
             for _ in 0..steps {
-                // Forward order is H, E, inject; so backward is un-inject
-                // with the amplitude negated, un-E, un-H.
+                // Forward order is H, inject-H, E, inject-E; backward undoes
+                // each in the opposite order, amplitudes negated.
+                params.source_drive = [0.0, -1.0, 0.0, 0.0];
                 let time = *step as f32 * time_step;
                 for source in sources.iter() {
-                    let injection = source.injection(grid, time);
-                    if injection.value == 0.0 {
-                        continue;
+                    for injection in source.injections(grid, time) {
+                        if injection.value != 0.0 && !injection.magnetic {
+                            encode_injection(
+                                &mut pass, pipelines, buffers, params, &injection, -1.0,
+                            );
+                        }
                     }
-                    params.source_region = [
-                        injection.origin[0] as u32,
-                        injection.origin[1] as u32,
-                        injection.origin[2] as u32,
-                        injection.component as u32,
-                    ];
-                    params.source_extent = [
-                        injection.extent[0] as u32,
-                        injection.extent[1] as u32,
-                        injection.extent[2] as u32,
-                        0,
-                    ];
-                    params.source_shape = [
-                        injection.center[0],
-                        injection.center[1],
-                        injection.center[2],
-                        injection.inverse_waist_squared,
-                    ];
-                    params.source_drive = [-injection.value, -1.0, 0.0, 0.0];
-
-                    let region = gpu::Extent {
-                        width: injection.extent[0] as u32,
-                        height: injection.extent[1] as u32,
-                        depth: injection.extent[2] as u32,
-                    };
-                    {
-                        let mut encoder = pass.with(&pipelines.inject);
-                        encoder.bind(0, &FieldData::new(buffers, *params));
-                        encoder.dispatch(pipelines.inject.get_dispatch_for(region));
-                    }
-                    pass.barrier();
                 }
-
-                params.source_drive = [0.0, -1.0, 0.0, 0.0];
                 {
                     let mut encoder = pass.with(&pipelines.electric);
                     encoder.bind(0, &FieldData::new(buffers, *params));
                     encoder.dispatch(pipelines.electric.get_dispatch_for(extent));
                 }
                 pass.barrier();
+                for source in sources.iter() {
+                    for injection in source.injections(grid, time) {
+                        if injection.value != 0.0 && injection.magnetic {
+                            encode_injection(
+                                &mut pass, pipelines, buffers, params, &injection, -1.0,
+                            );
+                        }
+                    }
+                }
                 {
                     let mut encoder = pass.with(&pipelines.magnetic);
                     encoder.bind(0, &FieldData::new(buffers, *params));
@@ -513,6 +573,43 @@ impl Simulation {
             }
         }
         self.sync_point = Some(context.submit(encoder));
+    }
+
+    /// Turns per-step intensity accumulation on or off.
+    ///
+    /// Turning it on starts a fresh average -- the buffer is zeroed -- and
+    /// each subsequent step adds `|E|²` per cell. Off costs nothing: the
+    /// dispatch simply never happens. Readers normalize by
+    /// [`Self::accumulated_steps`].
+    pub fn set_accumulate_intensity(&mut self, on: bool) {
+        if on && !self.accumulating {
+            self.clear_intensity();
+        }
+        self.accumulating = on;
+    }
+
+    /// Steps summed into the intensity buffer since it was last cleared.
+    pub fn accumulated_steps(&self) -> u64 {
+        self.accumulated
+    }
+
+    /// The running `Σ|E|²` buffer, one `f32` per cell, for a renderer.
+    pub fn intensity_buffer(&self) -> gpu::BufferPiece {
+        self.buffers.intensity.into()
+    }
+
+    fn clear_intensity(&mut self) {
+        if self.accumulated == 0 {
+            return;
+        }
+        self.wait();
+        self.encoder.start();
+        {
+            let mut pass = self.encoder.transfer("clear intensity");
+            pass.fill_buffer(self.buffers.intensity.into(), self.field_bytes / 3, 0);
+        }
+        self.sync_point = Some(self.context.submit(&mut self.encoder));
+        self.accumulated = 0;
     }
 
     /// Blocks until the last submission has retired.
@@ -532,9 +629,11 @@ impl Simulation {
             let mut pass = self.encoder.transfer("reset fields");
             pass.fill_buffer(self.buffers.electric.into(), self.field_bytes, 0);
             pass.fill_buffer(self.buffers.magnetic.into(), self.field_bytes, 0);
+            pass.fill_buffer(self.buffers.intensity.into(), self.field_bytes / 3, 0);
         }
         self.sync_point = Some(self.context.submit(&mut self.encoder));
         self.step = 0;
+        self.accumulated = 0;
     }
 
     /// Copies the electric field back to the host: `3 · cell_count` values,
@@ -596,15 +695,21 @@ impl Simulation {
     }
 
     fn read(&mut self, source: gpu::Buffer) -> Vec<f32> {
+        self.read_bytes(source, self.field_bytes)
+    }
+
+    /// The accumulated `Σ|E|²` per cell — see [`Self::set_accumulate_intensity`].
+    pub fn read_intensity(&mut self) -> Vec<f32> {
+        let bytes = self.field_bytes / 3;
+        self.read_bytes(self.buffers.intensity, bytes)
+    }
+
+    fn read_bytes(&mut self, source: gpu::Buffer, bytes: u64) -> Vec<f32> {
         self.wait();
         self.encoder.start();
         {
             let mut pass = self.encoder.transfer("readback");
-            pass.copy_buffer_to_buffer(
-                source.into(),
-                self.buffers.readback.into(),
-                self.field_bytes,
-            );
+            pass.copy_buffer_to_buffer(source.into(), self.buffers.readback.into(), bytes);
         }
         let sync_point = self.context.submit(&mut self.encoder);
         self.context
@@ -613,9 +718,10 @@ impl Simulation {
         self.context.sync_buffer(self.buffers.readback);
         self.sync_point = Some(sync_point);
 
-        let count = 3 * self.grid.extent.total();
-        // SAFETY: `readback` is host-visible, holds `count` `f32`s that the
-        // copy above has finished writing, and is not aliased elsewhere.
+        let count = bytes as usize / std::mem::size_of::<f32>();
+        // SAFETY: `readback` is host-visible, holds at least `count` `f32`s
+        // that the copy above has finished writing, and is not aliased
+        // elsewhere.
         let mapped = unsafe {
             std::slice::from_raw_parts(self.buffers.readback.data().cast::<f32>(), count)
         };
@@ -648,6 +754,8 @@ impl Steppable for Simulation {
     }
 
     fn restore(&mut self, snapshot: &Snapshot) {
+        // The average belongs to the history that was just abandoned.
+        self.clear_intensity();
         self.write(self.buffers.electric, &snapshot.electric);
         self.write(self.buffers.magnetic, &snapshot.magnetic);
         self.step = snapshot.step;
@@ -678,6 +786,7 @@ impl Drop for Simulation {
         self.context.destroy_buffer(self.buffers.absorber);
         self.context.destroy_buffer(self.buffers.geometry);
         self.context.destroy_buffer(self.buffers.lookup);
+        self.context.destroy_buffer(self.buffers.intensity);
         self.context.destroy_buffer(self.buffers.readback);
         self.context
             .destroy_compute_pipeline(&mut self.pipelines.magnetic);
