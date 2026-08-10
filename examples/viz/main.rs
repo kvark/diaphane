@@ -55,7 +55,7 @@ aiming:
     space          pause / resume
     R              reset the fields
     left / right   solver steps per frame
-    1..7           E+H / energy / E / H / total / the grid / ribbons
+    1..8           E+H / energy / E / H / total / grid / ribbons / averaged
     L              toggle signed-log scaling
     - / =          brightness
     [ / ]          scrub back / forward one keyframe interval
@@ -268,6 +268,10 @@ impl App {
         // it across a paused scrub left the scale of one step exposing the
         // picture of another: near-black after scrubbing loud to quiet.
         let mut advanced = steps > 0;
+        // The accumulator follows the view: on only while someone is looking
+        // at the average, and switching to it starts a fresh one.
+        self.simulation
+            .set_accumulate_intensity(self.common.settings.mode == ViewMode::Intensity);
         self.simulation.advance_by(steps);
         // The solver has to have finished before its buffers are sampled: the
         // renderer reads the very same allocations the kernels write.
@@ -476,6 +480,7 @@ impl App {
             KeyCode::Digit5 => settings.mode = ViewMode::ALL[4],
             KeyCode::Digit6 => settings.mode = ViewMode::ALL[5],
             KeyCode::Digit7 => settings.mode = ViewMode::ALL[6],
+            KeyCode::Digit8 => settings.mode = ViewMode::ALL[7],
             _ => {}
         }
     }

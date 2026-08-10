@@ -249,6 +249,30 @@ fn a_graded_grid_is_graded_the_same_way_on_the_gpu() {
 }
 
 #[test]
+fn a_plane_wave_agrees_between_the_solvers() {
+    // The plane wave is the one source that injects into H, and its
+    // corrections are interleaved between the half-updates rather than
+    // appended after them -- both paths through the GPU step loop that no
+    // other source exercises.
+    let mut scene = Scene::empty(Extent::new(96, 36, 36), 1e-3);
+    let frequency = scene.grid.frequency_for_resolution(20.0);
+    let glass = scene.materials.push(Material::refractive(1.5));
+    scene.shapes.push(Shape::Sphere {
+        center: [8e-3, 0.0, 0.0],
+        radius: 6e-3,
+        material: glass,
+    });
+    scene.sources.push(Source::plane_wave(
+        Axis::X,
+        -0.020,
+        Axis::Z,
+        Waveform::gaussian_pulse(frequency, 3.0),
+    ));
+    scene.validate().unwrap();
+    assert_parity(&scene, 350, 1e-4);
+}
+
+#[test]
 fn time_reversal_matches_between_the_solvers() {
     // A reversible scattering scene: a glass ball in a conducting box. The
     // packet shatters against the ball, then both solvers run the film
@@ -302,6 +326,43 @@ fn time_reversal_matches_between_the_solvers() {
         Axis::ALL.map(|axis| candidate.component(&magnetic, axis)),
         steps,
         1e-4,
+    );
+}
+
+#[test]
+fn the_intensity_accumulators_agree() {
+    // Same kernel discipline as the fields themselves: the CPU sums |E|² in
+    // plain loops, the GPU in a dispatch per step, and the two averages have
+    // to match. Accumulation starts mid-run, which also pins the fresh-start
+    // semantics of the switch on both sides.
+    let Ok(context) = headless_context() else {
+        eprintln!("skipping: no usable GPU device");
+        return;
+    };
+    let scene = Scene::photon(Extent::cube(32));
+    let mut reference = cpu::Simulation::new(&scene);
+    let mut candidate = gpu::Simulation::new(context, &scene);
+    reference.advance_by(60);
+    candidate.advance_by(60);
+    reference.set_accumulate_intensity(true);
+    candidate.set_accumulate_intensity(true);
+    reference.advance_by(90);
+    candidate.advance_by(90);
+    assert_eq!(reference.accumulated_steps(), 90);
+    assert_eq!(candidate.accumulated_steps(), 90);
+
+    let host = reference.intensity();
+    let device = candidate.read_intensity();
+    let peak = host.iter().fold(0.0f32, |acc, &v| acc.max(v));
+    assert!(peak > 0.0);
+    let worst = host
+        .iter()
+        .zip(device.iter())
+        .fold(0.0f32, |acc, (&a, &b)| acc.max((a - b).abs()));
+    assert!(
+        worst < 1e-4 * peak,
+        "intensity sums diverged by {:e} of the peak",
+        worst / peak
     );
 }
 

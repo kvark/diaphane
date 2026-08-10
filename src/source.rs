@@ -22,7 +22,7 @@
 //! limit, where the numerical dispersion is worst, so it injects visible garbage.
 //! Both failures look like solver bugs.
 
-use crate::grid::{Axis, Grid};
+use crate::grid::{Axis, Grid, SPEED_OF_LIGHT};
 use std::f32;
 
 /// The time profile of a source.
@@ -156,9 +156,29 @@ pub enum SourceShape {
     ///
     /// A waist comparable to the domain approximates a plane wave; a small one
     /// launches a diverging beam. The sheet is soft, so it radiates in *both*
-    /// directions along `axis` — total-field/scattered-field, which would make
-    /// it one-way, is not implemented.
+    /// directions along `axis` — for one-way injection use
+    /// [`SourceShape::PlaneWave`].
     Sheet { axis: Axis, offset: f32, waist: f32 },
+    /// A one-way plane wave travelling toward `+axis` from a
+    /// total-field/scattered-field plane at `offset` metres.
+    ///
+    /// Everything past the plane sees the incident wave plus whatever
+    /// scatters; everything before it sees *scattered field only* — which is
+    /// what makes clean scattering measurements possible. The trick is two
+    /// correction terms per step, one on the last scattered `H` row and one
+    /// on the first total `E` row, each the incident wave the other region is
+    /// not supposed to know about. At normal incidence those corrections are
+    /// constant across their planes, so the whole thing is two extra
+    /// injections whose values the host computes — including the *discrete*
+    /// retardation: the incident wave is evaluated at the numerical phase
+    /// velocity of the grid, not at `c`, because the cancellation has to
+    /// match what the stencil actually propagates.
+    ///
+    /// Wants a uniform grid along `axis` (validation checks) and vacuum on
+    /// the two correction planes; the wave spans the whole cross-section,
+    /// unapodized — a taper would reintroduce the two-way edges this shape
+    /// exists to remove.
+    PlaneWave { axis: Axis, offset: f32 },
 }
 
 /// A source: a shape, a direction, and a time profile.
@@ -219,6 +239,18 @@ impl Source {
         }
     }
 
+    /// A one-way plane wave travelling toward `+axis` — see
+    /// [`SourceShape::PlaneWave`]. `polarization` must be transverse to
+    /// `axis`, which validation checks.
+    pub fn plane_wave(axis: Axis, offset: f32, polarization: Axis, waveform: Waveform) -> Self {
+        Self {
+            shape: SourceShape::PlaneWave { axis, offset },
+            polarization,
+            waveform,
+            amplitude: 1.0,
+        }
+    }
+
     pub fn with_amplitude(mut self, amplitude: f32) -> Self {
         self.amplitude = amplitude;
         self
@@ -230,7 +262,7 @@ impl Source {
     pub fn position(&self) -> [f32; 3] {
         match self.shape {
             SourceShape::Point { at, .. } => at,
-            SourceShape::Sheet { axis, offset, .. } => {
+            SourceShape::Sheet { axis, offset, .. } | SourceShape::PlaneWave { axis, offset } => {
                 let mut position = [0.0; 3];
                 position[axis.index()] = offset;
                 position
@@ -240,10 +272,12 @@ impl Source {
 
     /// Resolves the source against a grid at one instant.
     ///
-    /// Both solvers consume this: it reduces every shape to a box of cells and
-    /// a weight function, so there is exactly one injection kernel rather than
-    /// one per shape.
-    pub fn injection(&self, grid: &Grid, time: f32) -> Injection {
+    /// Both solvers consume this: it reduces every shape to boxes of cells
+    /// and weight functions, so there is exactly one injection kernel rather
+    /// than one per shape. `time` is where `E` stands after the update this
+    /// injection follows: `(n+1)·Δt`. Most shapes fill one slot and leave the
+    /// other silent; the plane wave genuinely needs both.
+    pub fn injections(&self, grid: &Grid, time: f32) -> [Injection; 2] {
         let extent = grid.extent.as_array();
         let value = self.amplitude * self.waveform.evaluate(time);
         match self.shape {
@@ -253,17 +287,19 @@ impl Source {
                     at[1] + velocity[1] * time,
                     at[2] + velocity[2] * time,
                 ];
-                Injection {
+                let injection = Injection {
                     origin: grid.cell_containing(position),
                     extent: [1, 1, 1],
                     center: [0.0; 3],
                     inverse_waist_squared: 0.0,
                     component: self.polarization.index(),
+                    magnetic: false,
                     // Gone means silent. The position is a pure function of
                     // time, so the retraction that time reversal performs
                     // silences at exactly the same instant.
                     value: if grid.contains(position) { value } else { 0.0 },
-                }
+                };
+                [injection, injection.silenced()]
             }
             SourceShape::Sheet {
                 axis,
@@ -284,14 +320,84 @@ impl Source {
                 // in cells it would narrow wherever the grid was refined --
                 // which is precisely where somebody put a refinement because
                 // they cared what the field was doing.
-                Injection {
+                let injection = Injection {
                     origin,
                     extent: region,
                     center: [0.0; 3],
                     inverse_waist_squared: 1.0 / (waist * waist),
                     component: self.polarization.index(),
+                    magnetic: false,
                     value,
-                }
+                };
+                [injection, injection.silenced()]
+            }
+            SourceShape::PlaneWave { axis, offset } => {
+                let travel = axis.index();
+                let mut position = [0.0; 3];
+                position[travel] = offset;
+                // The first total-field E row; the last scattered H row sits
+                // one cell before it, so the plane cannot be at the wall.
+                let plane = grid.cell_containing(position)[travel].max(1);
+
+                let spacing = grid.spacing(axis).finest();
+                let time_step = grid.time_step();
+                let gain = SPEED_OF_LIGHT * time_step / spacing;
+
+                // The discrete dispersion relation along one axis,
+                // `sin(ωΔt/2) = S·sin(kΔ/2)`, solved for `k` at the carrier.
+                // The retardation between the two correction rows must use
+                // *this* `k`, not `ω/c`: the corrections exist to cancel what
+                // the stencil actually propagates, and the stencil is slow.
+                let omega = 2.0 * f32::consts::PI * self.waveform.dominant_frequency();
+                let half_k_spacing = ((0.5 * omega * time_step).sin() / gain).asin();
+                let retard = half_k_spacing / omega;
+
+                let mut e_origin = [0, 0, 0];
+                e_origin[travel] = plane;
+                let mut h_origin = [0, 0, 0];
+                h_origin[travel] = plane - 1;
+                let mut region = extent;
+                region[travel] = 1;
+
+                // Which H component a `+axis` wave polarized along `E[pol]`
+                // carries, and with which sign, both fall out of the cyclic
+                // curl convention. A test seeds the free-running solver with
+                // nothing but these two rows and checks that everything
+                // radiated leftward cancels.
+                let pol = self.polarization.index();
+                let h_axis = 3 - travel - pol;
+                let h_sign = if self.polarization.next().index() == travel {
+                    -1.0
+                } else {
+                    1.0
+                };
+
+                let drive = |t: f32| self.amplitude * self.waveform.evaluate(t);
+                [
+                    // The first total E row is missing the incident H just
+                    // behind it -- evaluated at H's own half step, half a
+                    // cell back along the travel axis.
+                    Injection {
+                        origin: e_origin,
+                        extent: region,
+                        center: [0.0; 3],
+                        inverse_waist_squared: 0.0,
+                        component: pol,
+                        magnetic: false,
+                        value: gain * drive(time - 0.5 * time_step + retard),
+                    },
+                    // The last scattered H row saw the incident E ahead of
+                    // it, at E's own previous full step.
+                    Injection {
+                        origin: h_origin,
+                        extent: region,
+                        center: [0.0; 3],
+                        inverse_waist_squared: 0.0,
+                        component: h_axis,
+                        magnetic: true,
+                        value: h_sign * gain * drive(time - time_step),
+                    },
+                ]
             }
         }
     }
@@ -310,14 +416,22 @@ pub struct Injection {
     /// `1/waist²` in 1/m². Zero means no apodization — every cell gets full
     /// weight.
     pub inverse_waist_squared: f32,
-    /// Index of the driven `E` component.
+    /// Index of the driven component.
     pub component: usize,
+    /// Whether the driven component is `H` rather than `E`. Ordinary sources
+    /// drive `E`; the plane wave's scattered-side correction drives `H`.
+    pub magnetic: bool,
     /// `amplitude · waveform(t)`, evaluated on the host so the kernel never
     /// needs to know what a Ricker wavelet is.
     pub value: f32,
 }
 
 impl Injection {
+    /// A copy that injects nothing, for shapes that fill only one slot.
+    fn silenced(mut self) -> Self {
+        self.value = 0.0;
+        self
+    }
     /// Number of cells this injection touches.
     pub fn cell_count(&self) -> usize {
         self.extent[0] * self.extent[1] * self.extent[2]
@@ -434,7 +548,7 @@ mod tests {
             Axis::Z,
             Waveform::ricker(1e9),
         );
-        let injection = source.injection(&grid(), 0.0);
+        let injection = source.injections(&grid(), 0.0)[0];
         assert_eq!(injection.cell_count(), 1);
         assert_eq!(injection.origin, [4, 5, 6]);
         assert_eq!(injection.component, 2);
@@ -446,7 +560,7 @@ mod tests {
         let grid = grid();
         // x = -8 mm is cell 8 of 32; a 6 mm waist is 6 cells.
         let source = Source::sheet(Axis::X, -8e-3, 6e-3, Axis::Z, Waveform::ricker(1e9));
-        let injection = source.injection(&grid, 0.0);
+        let injection = source.injections(&grid, 0.0)[0];
         assert_eq!(injection.origin, [8, 0, 0]);
         assert_eq!(injection.extent, [1, 40, 48]);
 
@@ -471,7 +585,7 @@ mod tests {
         let waveform = Waveform::ricker(1e9);
         let source = Source::point([0.0; 3], Axis::X, waveform).with_amplitude(3.0);
         let time = 0.7e-9;
-        let injection = source.injection(&grid, time);
+        let injection = source.injections(&grid, time)[0];
         assert!((injection.value - 3.0 * waveform.evaluate(time)).abs() < 1e-6);
     }
 
@@ -481,8 +595,8 @@ mod tests {
         // 100 ps, which is cell 16 to cell 31.
         let source =
             Source::point_moving([0.0; 3], [1.5e8, 0.0, 0.0], Axis::Z, Waveform::ricker(1e9));
-        assert_eq!(source.injection(&grid(), 0.0).origin, [16, 20, 24]);
-        assert_eq!(source.injection(&grid(), 1e-10).origin, [31, 20, 24]);
+        assert_eq!(source.injections(&grid(), 0.0)[0].origin, [16, 20, 24]);
+        assert_eq!(source.injections(&grid(), 1e-10)[0].origin, [31, 20, 24]);
     }
 
     #[test]
@@ -496,15 +610,42 @@ mod tests {
         };
         let mover = Source::point_moving([0.0; 3], [1.5e8, 0.0, 0.0], Axis::Z, waveform);
         let sitter = Source::point([0.0; 3], Axis::Z, waveform);
-        assert_eq!(mover.injection(&grid(), delay).value, 0.0);
-        assert!(sitter.injection(&grid(), delay).value.abs() > 0.99);
+        assert_eq!(mover.injections(&grid(), delay)[0].value, 0.0);
+        assert!(sitter.injections(&grid(), delay)[0].value.abs() > 0.99);
+    }
+
+    #[test]
+    fn a_plane_wave_makes_two_staggered_corrections() {
+        let grid = grid();
+        // Slow CW so the half-step stagger between the two samples is tiny
+        // against the period: both land in the same known-positive lobe.
+        let waveform = Waveform::ContinuousWave {
+            frequency: 1e9,
+            ramp_cycles: 1.0,
+        };
+        let source = Source::plane_wave(Axis::X, 0.0, Axis::Z, waveform);
+        let [electric, magnetic] = source.injections(&grid, 10.13e-9);
+
+        assert!(!electric.magnetic);
+        assert!(magnetic.magnetic);
+        // Ez rides the wave; Hy is the component a +x wave with Ez carries.
+        assert_eq!(electric.component, 2);
+        assert_eq!(magnetic.component, 1);
+        // The first total E row, and the last scattered H row just before it.
+        assert_eq!(electric.origin[0], magnetic.origin[0] + 1);
+        assert_eq!(electric.extent, [1, 40, 48]);
+        assert_eq!(magnetic.extent, [1, 40, 48]);
+        // Travel is the polarization's cyclic successor here, which is the
+        // orientation where the scattered-side correction carries the minus.
+        assert!(electric.value > 0.0, "{}", electric.value);
+        assert!(magnetic.value < 0.0, "{}", magnetic.value);
     }
 
     #[test]
     fn sheet_clamps_a_position_past_the_far_wall() {
         let grid = grid();
         let source = Source::sheet(Axis::Y, 9.9, 4e-3, Axis::X, Waveform::ricker(1e9));
-        let injection = source.injection(&grid, 0.0);
+        let injection = source.injections(&grid, 0.0)[0];
         assert_eq!(injection.origin[1], 39);
         assert!(matches!(source.shape, SourceShape::Sheet { .. }));
     }

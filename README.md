@@ -30,7 +30,10 @@ picture of *magnitude* can pull them apart. `--mode ribbons` plots them instead:
 `E` out one axis, `H` out the perpendicular one, both against the direction of
 travel. It is the textbook figure, drawn from the solver's own data, and the
 only view in which the right angle is visible — because a right angle is a fact
-about direction, and direction has to be plotted to have a place.
+about direction, and direction has to be plotted to have a place. `--mode
+intensity` is the other derived view: the time average a detector integrates,
+accumulated by the solver only while you watch it — the view in which the
+double slit's fringes stop shimmering and stand still.
 
 The window adds a control panel: transport, a scrub slider over the whole run,
 view mode, brightness, and the throughput numbers. Stepping backwards is a
@@ -54,7 +57,7 @@ cargo viz --scene scenes/double-slit.ron
 cargo render --scene cavity --save-scene mine.ron
 ```
 
-[`scenes/`](scenes) has fourteen worked examples, each commented with what it
+[`scenes/`](scenes) has fifteen worked examples, each commented with what it
 shows, why the numbers are what they are, and what to look at. The originals:
 free flight, a conducting cavity, a glass slab, a metal sphere, Young's double
 slit, and a subwavelength film on a graded grid. The demo shelf:
@@ -73,6 +76,9 @@ slit, and a subwavelength film on a graded grid. The demo shelf:
   few circuits by total internal reflection.
 - **`cherenkov.ron`** — a point source crossing glass at 0.9 c, faster than
   its own light, piling its wavefronts into a 42° Mach cone.
+- **`scattering.ron`** — a one-way plane wave (total-field/scattered-field,
+  phase-matched to the grid's own dispersion) breaking over a metal sphere:
+  behind the injection plane there is nothing but what the sphere sends back.
 - **`shatter.ron`** — built to be run backwards; see below.
 
 ## Cells are boxes, not cubes
@@ -176,7 +182,7 @@ in [`src/grid.rs`](src/grid.rs) and referred to from everywhere else. Every FDTD
 
 ## Validation
 
-`cargo test` runs 121 checks without needing a GPU, and the ones worth naming
+`cargo test` runs 125 checks without needing a GPU, and the ones worth naming
 are the ones that could not pass by accident: an **exact discrete plane wave**
 seeded and required to propagate exactly — not a discretized continuum
 solution, a solution of the stepping scheme itself; **numerical phase velocity**

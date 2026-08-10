@@ -38,7 +38,9 @@ struct Params {
     extent: vec4<u32>,
     // source origin xyz, driven component
     source_region: vec4<u32>,
-    // source extent xyz, unused
+    // source extent xyz, then 1 when the driven component is H rather than E
+    // -- ordinary sources drive E, but a plane wave's scattered-side
+    // correction has to touch the last scattered H row.
     source_extent: vec4<u32>,
     // apodization centre xyz, 1/waist^2
     source_shape: vec4<f32>,
@@ -63,6 +65,8 @@ var<storage, read> absorber: array<f32>;
 // gains, then cell centres in metres. Packed and documented in
 // `Grid::packed_geometry`.
 var<storage, read> geometry: array<f32>;
+// Running Σ|E|² per cell; see `accumulate_intensity`.
+var<storage, read_write> intensity: array<f32>;
 var<uniform> params: Params;
 
 fn extent_of(axis: u32) -> u32 {
@@ -209,6 +213,25 @@ fn update_electric(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 }
 
+// Accumulates |E|² per cell -- what a detector integrates. Bound through its
+// own layout (`IntensityData`), dispatched once per step only while a viewer
+// has the intensity view up, so the solver pays nothing otherwise. The sum is
+// left unnormalized; readers divide by the step count the host carries.
+@compute @workgroup_size(8, 8, 1)
+fn accumulate_intensity(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if !in_bounds(global_id) {
+        return;
+    }
+    let index = cell_index(global_id);
+    let cells = params.extent.w;
+    var sum = 0.0;
+    for (var a = 0u; a < 3u; a += 1u) {
+        let value = electric[a * cells + index];
+        sum += value * value;
+    }
+    intensity[index] += sum;
+}
+
 // Soft (additive) source injection. The host has already evaluated the
 // waveform, so this kernel only has to place and apodize it.
 @compute @workgroup_size(8, 8, 1)
@@ -240,5 +263,10 @@ fn inject(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let slot = params.source_region.w * params.extent.w + cell_index(coord);
-    electric[slot] += params.source_drive.x * weight;
+    let drive = params.source_drive.x * weight;
+    if params.source_extent.w == 1u {
+        magnetic[slot] += drive;
+    } else {
+        electric[slot] += drive;
+    }
 }
