@@ -136,7 +136,20 @@ impl Waveform {
 pub enum SourceShape {
     /// A single Yee cell: an oscillating point dipole, which radiates the
     /// familiar toroidal pattern with a null along its own axis.
-    Point { at: [f32; 3] },
+    ///
+    /// A nonzero `velocity` slides it through the grid, hopping cell to cell,
+    /// and it goes *silent* once its true position leaves the domain — a
+    /// clamped mover would keep pouring energy into whatever wall cell it
+    /// stuck to. Slower than the local phase velocity the wake is a Doppler
+    /// pattern; faster than `c/n` inside a dielectric it closes into a Mach
+    /// cone, which is Cherenkov radiation with nothing exotic involved.
+    Point {
+        at: [f32; 3],
+        /// Metres per second. Zero — the serde default, so older scene files
+        /// still parse — stands still.
+        #[cfg_attr(feature = "serde", serde(default))]
+        velocity: [f32; 3],
+    },
     /// A planar sheet normal to `axis`, at `offset` metres along it, centred
     /// on the domain transversely and apodized by a Gaussian of the given
     /// waist in metres.
@@ -164,8 +177,19 @@ pub struct Source {
 impl Source {
     /// A point dipole at a position in metres.
     pub fn point(at: [f32; 3], polarization: Axis, waveform: Waveform) -> Self {
+        Self::point_moving(at, [0.0; 3], polarization, waveform)
+    }
+
+    /// A point dipole that starts `at` and moves at `velocity` metres per
+    /// second — see [`SourceShape::Point`] for what motion means here.
+    pub fn point_moving(
+        at: [f32; 3],
+        velocity: [f32; 3],
+        polarization: Axis,
+        waveform: Waveform,
+    ) -> Self {
         Self {
-            shape: SourceShape::Point { at },
+            shape: SourceShape::Point { at, velocity },
             polarization,
             waveform,
             amplitude: 1.0,
@@ -200,11 +224,12 @@ impl Source {
         self
     }
 
-    /// Where this source sits, in metres. A sheet reports the centre of the
-    /// plane it occupies.
+    /// Where this source sits at `t = 0`, in metres. A sheet reports the
+    /// centre of the plane it occupies; a moving point reports where it
+    /// starts, which is the position validation checks.
     pub fn position(&self) -> [f32; 3] {
         match self.shape {
-            SourceShape::Point { at } => at,
+            SourceShape::Point { at, .. } => at,
             SourceShape::Sheet { axis, offset, .. } => {
                 let mut position = [0.0; 3];
                 position[axis.index()] = offset;
@@ -222,14 +247,24 @@ impl Source {
         let extent = grid.extent.as_array();
         let value = self.amplitude * self.waveform.evaluate(time);
         match self.shape {
-            SourceShape::Point { at } => Injection {
-                origin: grid.cell_containing(at),
-                extent: [1, 1, 1],
-                center: [0.0; 3],
-                inverse_waist_squared: 0.0,
-                component: self.polarization.index(),
-                value,
-            },
+            SourceShape::Point { at, velocity } => {
+                let position = [
+                    at[0] + velocity[0] * time,
+                    at[1] + velocity[1] * time,
+                    at[2] + velocity[2] * time,
+                ];
+                Injection {
+                    origin: grid.cell_containing(position),
+                    extent: [1, 1, 1],
+                    center: [0.0; 3],
+                    inverse_waist_squared: 0.0,
+                    component: self.polarization.index(),
+                    // Gone means silent. The position is a pure function of
+                    // time, so the retraction that time reversal performs
+                    // silences at exactly the same instant.
+                    value: if grid.contains(position) { value } else { 0.0 },
+                }
+            }
             SourceShape::Sheet {
                 axis,
                 offset,
@@ -438,6 +473,31 @@ mod tests {
         let time = 0.7e-9;
         let injection = source.injection(&grid, time);
         assert!((injection.value - 3.0 * waveform.evaluate(time)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_moving_point_tracks_its_velocity() {
+        // Half of c along +x from the centre of a 32-cell axis: 15 mm in
+        // 100 ps, which is cell 16 to cell 31.
+        let source =
+            Source::point_moving([0.0; 3], [1.5e8, 0.0, 0.0], Axis::Z, Waveform::ricker(1e9));
+        assert_eq!(source.injection(&grid(), 0.0).origin, [16, 20, 24]);
+        assert_eq!(source.injection(&grid(), 1e-10).origin, [31, 20, 24]);
+    }
+
+    #[test]
+    fn a_moving_point_goes_silent_when_it_leaves() {
+        // At the Ricker's own peak time the mover is far outside the domain,
+        // while a static twin is at full drive -- so the zero is the
+        // position's doing, not the waveform's.
+        let waveform = Waveform::ricker(1e9);
+        let Waveform::Ricker { delay, .. } = waveform else {
+            unreachable!()
+        };
+        let mover = Source::point_moving([0.0; 3], [1.5e8, 0.0, 0.0], Axis::Z, waveform);
+        let sitter = Source::point([0.0; 3], Axis::Z, waveform);
+        assert_eq!(mover.injection(&grid(), delay).value, 0.0);
+        assert!(sitter.injection(&grid(), delay).value.abs() > 0.99);
     }
 
     #[test]

@@ -195,6 +195,14 @@ fn several_sources_at_once() {
         Axis::Z,
         Waveform::gaussian_pulse(frequency, 3.0),
     ));
+    // A mover crosses the domain and exits around step 160 of 250, so the
+    // per-step origin *and* the silence-on-exit both happen under comparison.
+    scene.sources.push(Source::point_moving(
+        [-6e-3, 2e-3, 0.0],
+        [2.7e8, 0.0, 0.0],
+        Axis::Z,
+        Waveform::ricker(frequency),
+    ));
     assert_parity(&scene, 250, 1e-4);
 }
 
