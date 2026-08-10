@@ -1,0 +1,63 @@
+// Cherenkov radiation: a source outrunning its own light.
+//
+// The whole domain is n = 1.5 glass, where light manages only c/1.5 ≈ 0.67 c.
+// The dipole crosses it at 0.9 c — faster than anything it emits — so its
+// wavefronts cannot get out of the way and pile into a Mach cone trailing
+// the source, opening at cos θ = (c/n)/v: θ ≈ 42° here. The same physics
+// that makes the blue glow of a reactor pool, from nothing more exotic than
+// a point source with a velocity.
+//
+// Nothing about the solver knows what "faster than light" means: the source
+// position is just a function of time, and the cone assembles itself out of
+// ordinary spherical wavelets. Slow the source below 0.67 c and the cone
+// unfolds into a Doppler pattern — compressed ahead, stretched behind.
+//
+// The source goes silent when it reaches the wall at x = +60 mm (about
+// step 245); the cone keeps travelling and the absorber swallows it.
+//
+// The wake is faint next to the source itself, so lean on the signed-log
+// compression to see the full cone.
+//
+// Try:
+//   cargo viz --scene scenes/cherenkov.ron --steps 2 --mode electric --log 12
+//   cargo render --scene scenes/cherenkov.ron --warmup 120 --frames 8 --steps 20 --log 12
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 120, y: 60, z: 60),
+        cell_size: 0.001,
+        courant: 0.5,
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // n = 1.5: light's speed limit here is 0.667 c. The source ignores it.
+        Material(
+            relative_permittivity: 2.25,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        // Glass everywhere: an infinite thickness paints the whole domain.
+        Slab(axis: X, offset: 0.0, thickness: inf, material: 1),
+    ],
+    sources: [
+        Source(
+            // 0.9 c along +x, starting near the left wall. The waveform is a
+            // steady 14.99 GHz tone (λ = 13.3 mm in the glass), so the cone
+            // is a standing pattern in the source's frame rather than a
+            // one-off pulse.
+            shape: Point(at: (-0.05, 0.0, 0.0), velocity: (269813180.0, 0.0, 0.0)),
+            polarization: Z,
+            waveform: ContinuousWave(frequency: 14989622000.0, ramp_cycles: 2.0),
+            amplitude: 1.0,
+        ),
+    ],
+)

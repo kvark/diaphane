@@ -1,0 +1,81 @@
+// A Bragg mirror: six pairs of quarter-wave films, reflecting like metal
+// while being nothing but clear glass.
+//
+// Each interface reflects weakly — amplitude (2.0−1.4)/3.4 ≈ 0.18 — but every
+// layer is a quarter wave thick at the design frequency, so all twelve echoes
+// leave in phase and add. Six pairs of n = 2.0 / 1.4 in vacuum should send
+// back about 95% of the in-band power: R = ((1−q)/(1+q))² with
+// q = (1.4/2.0)¹² ≈ 0.014. What leaks through is the *out-of-band* tail of the
+// pulse — a 3-cycle packet is wider than the stopband, and the band edges are
+// legitimately transparent.
+//
+// The layers are 2.75 mm and 3.93 mm thick — λ₀/(4n) at λ₀ = 22 mm — which a
+// 1 mm grid would staircase badly, so the stack sits in a band refined to
+// 0.25 mm. This is the layered-stack case the graded grid exists for.
+//
+// Try:
+//   cargo viz --scene scenes/bragg-mirror.ron --warmup 700 --mode electric
+//   cargo render --scene scenes/bragg-mirror.ron --warmup 650 --frames 6 --steps 60
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 110, y: 60, z: 60),
+        cell_size: 0.001,
+        courant: 0.5,
+        refinements: [
+            // 0.25 mm across the stack; y and z opt out with a zero size.
+            Refinement(center: (0.012, 0.0, 0.0), size: (0.044, 0.0, 0.0), cell_size: 0.00025),
+        ],
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // n = 2.0: the high-index quarter-wave film, 22/(4·2.0) = 2.75 mm.
+        Material(
+            relative_permittivity: 4.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // n = 1.4: the low-index spacer, 22/(4·1.4) = 3.93 mm.
+        Material(
+            relative_permittivity: 1.96,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        // Six H/L pairs, high-index first, centred as a stack on x = +12 mm.
+        Slab(axis: X, offset: -0.0066607, thickness: 0.00275, material: 1),
+        Slab(axis: X, offset: -0.0033214, thickness: 0.0039286, material: 2),
+        Slab(axis: X, offset: 0.0000179, thickness: 0.00275, material: 1),
+        Slab(axis: X, offset: 0.0033571, thickness: 0.0039286, material: 2),
+        Slab(axis: X, offset: 0.0066964, thickness: 0.00275, material: 1),
+        Slab(axis: X, offset: 0.0100357, thickness: 0.0039286, material: 2),
+        Slab(axis: X, offset: 0.0133750, thickness: 0.00275, material: 1),
+        Slab(axis: X, offset: 0.0167143, thickness: 0.0039286, material: 2),
+        Slab(axis: X, offset: 0.0200536, thickness: 0.00275, material: 1),
+        Slab(axis: X, offset: 0.0233929, thickness: 0.0039286, material: 2),
+        Slab(axis: X, offset: 0.0267321, thickness: 0.00275, material: 1),
+        Slab(axis: X, offset: 0.0300714, thickness: 0.0039286, material: 2),
+    ],
+    sources: [
+        Source(
+            // 13.627 GHz: λ₀ = 22 mm, the frequency every layer is tuned to.
+            shape: Sheet(axis: X, offset: -0.045, waist: 0.016),
+            polarization: Z,
+            waveform: GaussianPulse(
+                center_frequency: 13626929000.0,
+                duration_cycles: 3.0,
+                delay: 0.00000000044030463,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

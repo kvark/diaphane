@@ -1,0 +1,65 @@
+// A Fabry–Pérot etalon: two partial mirrors that trap light between them.
+//
+// Each n = 3.5 film is 0.9 mm thick and reflects about 40% of the power on
+// its own. But the gap between them is exactly one wavelength (36 mm), so
+// the field that leaks in keeps arriving in phase with itself: it builds up,
+// rings, and drains back out as a train of pulses — one every round trip,
+// 2L/c ≈ 0.24 ns, roughly every 300 steps at these settings. Storage in
+// nothing, made of two pieces of glass and a resonance.
+//
+// Detune the source frequency by 20% and the buildup disappears: off
+// resonance the etalon is just two weak mirrors.
+//
+// Try:
+//   cargo viz --scene scenes/fabry-perot.ron --warmup 1300 --mode energy
+//   cargo viz --scene scenes/fabry-perot.ron --warmup 1300 --mode electric
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 120, y: 60, z: 60),
+        cell_size: 0.001,
+        courant: 0.5,
+        refinements: [
+            // 0.3 mm across each film: three cells through the mirror rather
+            // than "one, or is it two" at the base resolution.
+            Refinement(center: (-0.018450, 0.0, 0.0), size: (0.004, 0.0, 0.0), cell_size: 0.0003),
+            Refinement(center: (0.018450, 0.0, 0.0), size: (0.004, 0.0, 0.0), cell_size: 0.0003),
+        ],
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // n = 3.5: a thin high-index film is a partial mirror — about 40%
+        // power reflectance at this thickness and frequency.
+        Material(
+            relative_permittivity: 12.25,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        // Inner faces at ±18 mm: a 36 mm cavity, one design wavelength long.
+        Slab(axis: X, offset: -0.018450, thickness: 0.0009, material: 1),
+        Slab(axis: X, offset: 0.018450, thickness: 0.0009, material: 1),
+    ],
+    sources: [
+        Source(
+            // 8.328 GHz: λ₀ = 36 mm. Four cycles, narrow enough in frequency
+            // to sit on the resonance rather than straddle it.
+            shape: Sheet(axis: X, offset: -0.048, waist: 0.016),
+            polarization: Z,
+            waveform: GaussianPulse(
+                center_frequency: 8327568400.0,
+                duration_cycles: 4.0,
+                delay: 0.00000000096066455,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

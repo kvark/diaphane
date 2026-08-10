@@ -54,9 +54,26 @@ cargo viz --scene scenes/double-slit.ron
 cargo render --scene cavity --save-scene mine.ron
 ```
 
-[`scenes/`](scenes) has six worked examples — free flight, a conducting cavity,
-a glass slab, a metal sphere, Young's double slit, and a subwavelength film on
-a graded grid — each commented with what it shows and what to look at.
+[`scenes/`](scenes) has fourteen worked examples, each commented with what it
+shows, why the numbers are what they are, and what to look at. The originals:
+free flight, a conducting cavity, a glass slab, a metal sphere, Young's double
+slit, and a subwavelength film on a graded grid. The demo shelf:
+
+- **`bragg-mirror.ron`** — six pairs of quarter-wave films reflecting ~95% of
+  in-band power while being nothing but clear glass, on a graded grid.
+- **`anti-reflection.ron`** — a quarter wave of n = √n makes a glass face
+  vanish; delete the coating slab and the echo comes back.
+- **`fabry-perot.ron`** — two 40% mirrors and a resonance trap a pulse, which
+  drains back out as a train, one every round trip.
+- **`luneburg.ron`** — a graded-index ball (eight shells of it) that focuses a
+  plane wave onto its own rim with no aberration to have.
+- **`attenuation.ron`** — a matched-lossy sea: the packet enters without an
+  echo and dims exponentially, the way radio dies underwater.
+- **`whispering-gallery.ron`** — a beam grazing a glass ball, trapped into a
+  few circuits by total internal reflection.
+- **`cherenkov.ron`** — a point source crossing glass at 0.9 c, faster than
+  its own light, piling its wavefronts into a 42° Mach cone.
+- **`shatter.ron`** — built to be run backwards; see below.
 
 ## Cells are boxes, not cubes
 
@@ -102,9 +119,18 @@ independent ways to move backwards:
   what the scrub bar along the bottom of the window drags. 24 bytes per cell
   per keyframe, so a long run gets a *window* rather than a full history.
 - **Reversal.** Leapfrog is an exact involution, so the solver runs backwards
-  with no memory at all — in a lossless box. Through the absorbing layer it
-  amplifies by 3× per step, so `reverse` refuses rather than returning an
-  exponentially growing field.
+  with no memory at all — in a lossless box. Both solvers: on the GPU the
+  inverse update is the forward kernels with the sign of time in one uniform.
+  Through the absorbing layer reversal amplifies by over 3× per step, so
+  `reverse` refuses rather than returning an exponentially growing field.
+
+![A pulse shattering against a glass ball, then running backwards](https://raw.githubusercontent.com/kvark/diaphane/main/docs/media/shatter.gif)
+
+*`cargo render --scene scenes/shatter.ron --frames 48 --steps 12 --reverse-at
+288 --gain 12 --log 10 --gif shatter.gif`: a pulse shatters against a glass
+ball for 288 steps, then the film runs in reverse — the solver un-stepping,
+not replaying — until the chaos reassembles and drains back into the source,
+leaving an empty box.*
 
 ## What is here
 
@@ -150,7 +176,7 @@ in [`src/grid.rs`](src/grid.rs) and referred to from everywhere else. Every FDTD
 
 ## Validation
 
-`cargo test` runs 117 checks without needing a GPU, and the ones worth naming
+`cargo test` runs 121 checks without needing a GPU, and the ones worth naming
 are the ones that could not pass by accident: an **exact discrete plane wave**
 seeded and required to propagate exactly — not a discretized continuum
 solution, a solution of the stepping scheme itself; **numerical phase velocity**
