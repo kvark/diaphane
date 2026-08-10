@@ -146,12 +146,13 @@ convenience and mostly a correctness one — it means "the slider moved" and "th
 solver stepped" cannot interleave differently depending on which widget was
 touched.
 
-**Stepping backwards is a seek, not an inverse update.** `cpu::Simulation` can
-run leapfrog backwards exactly, because it is an involution, but the GPU solver
-has no reverse kernel — so the viewer's step-back restores the nearest earlier
-keyframe and replays forward. Correct always; instant only inside the keyframe
-window, and the panel says which part of the run that is rather than leaving a
-long drag's pause unexplained.
+**Stepping backwards is a seek, not an inverse update.** Both solvers can run
+leapfrog backwards exactly, because it is an involution — but only in a
+lossless scene, while the slider has to work everywhere, and a slider is
+random access, which un-stepping one step at a time is not. So the viewer's
+step-back restores the nearest earlier keyframe and replays forward. Correct
+always; instant only inside the keyframe window, and the panel says which part
+of the run that is rather than leaving a long drag's pause unexplained.
 
 What is still not implemented is the brief's *painting*: geometry authoring is
 by file, not by pointer. `--scene <path.ron>` loads one and `--save-scene`
@@ -191,6 +192,13 @@ memory at all — but it costs one step per step, and through the absorbing
 layer it amplifies by more than 3× per step, so it refuses there. It is the
 right tool for nudging back a frame and the wrong one for a slider. A test
 runs both routes to the same step and requires them to agree.
+
+The GPU performs the same involution with its *forward* kernels: with nothing
+lossy, the inverse update is the forward update with the gain negated and the
+half-steps swapped, so the direction of time is a single uniform rather than a
+second set of pipelines. `cargo render --reverse-at` is the front door,
+`scenes/shatter.ron` the scene built for it, and a parity test requires both
+solvers to land on the same past.
 
 ## Deviation 7: the visualizer is an example, and CI runs the one with a window
 

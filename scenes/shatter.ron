@@ -1,0 +1,68 @@
+// Shatter and reassemble: the scene built for running the film backwards.
+//
+// A pulse from a point dipole shatters against a glass ball in a closed
+// conducting box. After a few hundred steps the box holds nothing but
+// structureless ringing — the packet looks gone, the way a dropped glass
+// looks gone. It is not: a lossless leapfrog forgets nothing, and this scene
+// is deliberately reversible — PEC walls, no conductivity anywhere — so the
+// solver can run the update *backwards* until the chaos reassembles into the
+// original pulse and drains back into the source, exactly.
+//
+// This is the demo for `--reverse-at`:
+//
+//   cargo render --scene scenes/shatter.ron --frames 48 --steps 12 \
+//       --reverse-at 288 --gain 12 --log 10 --gif shatter.gif
+//
+// (The gain and log matter: the auto-exposure calibrates to the source's
+// bright ignition and would leave the later, hundred-fold-dimmer chaos
+// nearly black. A static boost plus signed-log compression holds both.)
+//
+// runs 288 steps of shattering forward, then the same film in reverse. The
+// reversal is the solver un-stepping, not a replay — see the Time section of
+// the README for why the absorbing boundary would forbid this.
+//
+// Try:
+//   cargo viz --scene scenes/shatter.ron --warmup 80 --steps 4
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 64, y: 56, z: 56),
+        cell_size: 0.001,
+        courant: 0.5,
+    ),
+    // PEC, not absorbing: reversal needs every step to be lossless.
+    boundary: Pec,
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // n = 2.0 glass: a hard enough scatterer to make a convincing mess,
+        // with no conductivity so the mess stays invertible.
+        Material(
+            relative_permittivity: 4.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        Sphere(center: (0.006, 0.0, 0.0), radius: 0.007, material: 1),
+    ],
+    sources: [
+        Source(
+            // 12.491 GHz Ricker: the peak leaves the source around step 67,
+            // reaches the ball around step 110, and by step ~280 the box is
+            // full of scrambled echoes — the turnaround moment.
+            shape: Point(at: (-0.015, 0.0, 0.0)),
+            polarization: Z,
+            waveform: Ricker(
+                peak_frequency: 12491352000.0,
+                delay: 0.00000000011207753,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

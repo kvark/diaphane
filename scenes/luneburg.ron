@@ -1,0 +1,70 @@
+// A Luneburg lens: a graded-index ball that focuses without aberration.
+//
+// The recipe is n(r) = √(2 − (r/R)²) — index √2 at the centre, easing to 1 at
+// the rim, so the surface itself refracts nothing and there is no boundary to
+// aberrate. Every parallel ray entering the ball, at any height, lands on the
+// *same* point of the far rim. Watch the flat wavefront arrive, curl around
+// the shells, and collapse to a bright spot at x = +8 mm — the rim point
+// opposite the source.
+//
+// Eight concentric shells approximate the profile, painter's order: the
+// biggest sphere first, each smaller one repainting the inside of the last,
+// each carrying n at its shell's mid-radius. The index never exceeds √2, so a
+// millimetre grid resolves the whole lens without refinement — the gradient
+// carries the physics, not any single interface.
+//
+// Try:
+//   cargo viz --scene scenes/luneburg.ron --warmup 340 --mode energy --gain 2
+//   cargo render --scene scenes/luneburg.ron --warmup 300 --frames 8 --steps 15 --mode energy --gain 2
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 96, y: 64, z: 64),
+        cell_size: 0.001,
+        courant: 0.5,
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // εr = 2 − (r_mid/R)² per shell, outermost to innermost.
+        Material(relative_permittivity: 1.12109, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+        Material(relative_permittivity: 1.33984, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+        Material(relative_permittivity: 1.52734, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+        Material(relative_permittivity: 1.68359, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+        Material(relative_permittivity: 1.80859, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+        Material(relative_permittivity: 1.90234, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+        Material(relative_permittivity: 1.96484, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+        Material(relative_permittivity: 1.99609, relative_permeability: 1.0, conductivity: 0.0, magnetic_loss: 0.0),
+    ]),
+    shapes: [
+        // R = 16 mm, centred at (−8, 0, 0) so the focus lands at (+8, 0, 0).
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.016, material: 1),
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.014, material: 2),
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.012, material: 3),
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.010, material: 4),
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.008, material: 5),
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.006, material: 6),
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.004, material: 7),
+        Sphere(center: (-0.008, 0.0, 0.0), radius: 0.002, material: 8),
+    ],
+    sources: [
+        Source(
+            // 18.737 GHz: λ₀ = 16 mm, R = λ₀ — big enough to focus, small
+            // enough that the focal spot is visibly wavelength-sized.
+            // The wide waist approximates a plane wave across the lens.
+            shape: Sheet(axis: X, offset: -0.040, waist: 0.024),
+            polarization: Z,
+            waveform: GaussianPulse(
+                center_frequency: 18737027000.0,
+                duration_cycles: 3.0,
+                delay: 0.00000000032022157,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)

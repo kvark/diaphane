@@ -1,0 +1,67 @@
+// A whispering gallery, in miniature: light trapped skimming a glass ball.
+//
+// The beam aims past the centre of an n = 2.5 sphere, striking its upper rim
+// at a glancing angle. What refracts in meets the far surface beyond the
+// critical angle (sin θc = 1/2.5, θc ≈ 24°), reflects totally, and does it
+// again — a crescent of light hugging the inside of the surface for a few
+// transits before leaking away. The same geometry, scaled up, is how a
+// whispering-gallery resonator stores light; at two wavelengths of radius
+// this is the honest miniature of it, circulation without the high Q.
+//
+// The sphere needs 0.5 mm cells (λ inside is 6 mm), and a refinement is a
+// tensor product — so the refined region is the 32 mm box around the ball,
+// and the grid pays for fine cells along all three axes there. This is the
+// expensive kind of refinement the graded grid warns about, spent where a
+// sphere leaves no choice.
+//
+// Try:
+//   cargo viz --scene scenes/whispering-gallery.ron --warmup 450 --mode energy
+
+Scene(
+    grid: Grid(
+        extent: Extent(x: 72, y: 64, z: 64),
+        cell_size: 0.001,
+        courant: 0.5,
+        refinements: [
+            // 0.5 mm cells across the ball, all three axes: 12 cells per
+            // in-glass wavelength on a sphere a coarse grid would staircase.
+            Refinement(center: (0.0, -0.009, 0.0), size: (0.032, 0.032, 0.032), cell_size: 0.0005),
+        ],
+    ),
+    boundary: Absorbing(thickness: 10, target_reflection: 0.000001),
+    materials: MaterialTable(materials: [
+        Material(
+            relative_permittivity: 1.0,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+        // n = 2.5: critical angle 24°, so grazing entries trap easily.
+        Material(
+            relative_permittivity: 6.25,
+            relative_permeability: 1.0,
+            conductivity: 0.0,
+            magnetic_loss: 0.0,
+        ),
+    ]),
+    shapes: [
+        // Centred 9 mm below the beam line, so the beam strikes the top of
+        // the ball at a glancing angle instead of head on.
+        Sphere(center: (0.0, -0.009, 0.0), radius: 0.014, material: 1),
+    ],
+    sources: [
+        Source(
+            // 19.986 GHz: λ₀ = 15 mm, 6 mm inside the glass. The narrow waist
+            // makes a beam rather than a plane wave — the impact parameter is
+            // what sets up the graze.
+            shape: Sheet(axis: X, offset: -0.030, waist: 0.005),
+            polarization: Z,
+            waveform: GaussianPulse(
+                center_frequency: 19986164000.0,
+                duration_cycles: 3.0,
+                delay: 0.00000000030020769,
+            ),
+            amplitude: 1.0,
+        ),
+    ],
+)
