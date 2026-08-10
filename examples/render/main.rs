@@ -35,6 +35,8 @@ struct Options {
     /// are meant to be clean images; CI turns it on so that branch of the
     /// shader is not dead code.
     timeline: bool,
+    /// Run the film backwards once the solver reaches this step.
+    reverse_at: Option<u64>,
 }
 
 impl Default for Options {
@@ -47,6 +49,7 @@ impl Default for Options {
             gif: None,
             gif_delay: 5,
             timeline: false,
+            reverse_at: None,
         }
     }
 }
@@ -67,6 +70,8 @@ OPTIONS:
     --gif <PATH>                  collect the frames into one animated GIF
     --gif-delay <CENTISECONDS>    per GIF frame                [default: 5]
     --timeline                    draw the scrub bar into the frames
+    --reverse-at <STEP>           run the film backwards from this step on
+                                  (needs a lossless scene: PEC walls, no metal)
 
 Needs no window system, so this is what CI runs.
 "
@@ -91,6 +96,7 @@ fn parse() -> Result<Options, String> {
             "--gif" => options.gif = Some(PathBuf::from(args.value(&flag)?)),
             "--gif-delay" => options.gif_delay = args.parse(&flag)?,
             "--timeline" => options.timeline = true,
+            "--reverse-at" => options.reverse_at = Some(args.parse(&flag)?),
             other => return Err(format!("unknown flag {other:?}; try --help")),
         }
     }
@@ -140,6 +146,15 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
     );
 
     let scene = options.common.scene()?;
+    // Refused here with a sentence rather than three frames deep with an
+    // assert: the flag is the reversal feature's front door.
+    if options.reverse_at.is_some() && !scene.is_reversible() {
+        return Err(
+            "--reverse-at needs a lossless scene: PEC walls (the cavity \
+                    preset, or `boundary: Pec`) and no conductive material"
+                .into(),
+        );
+    }
     let mut simulation = Simulation::new(Arc::clone(&context), &scene);
     let mut renderer = Renderer::new(Arc::clone(&context), Capture::FORMAT);
     let mut capture = Capture::new(
@@ -180,8 +195,24 @@ fn run(options: &Options) -> Result<(), Box<dyn Error>> {
         )
     });
     let mut settings = options.common.settings;
+    // Latched, not re-derived: the first reversal drops the step back below
+    // the threshold, and re-checking would advance again -- a ping-pong
+    // around the turnaround instead of a film run backwards.
+    let mut backwards = false;
     for frame in 0..frames {
-        simulation.advance_by(u64::from(options.common.steps_per_frame));
+        // Past the turnaround the film runs backwards -- the leapfrog is an
+        // involution, so this is the solver actually un-stepping, not a
+        // replay. At step zero it parks rather than underflowing.
+        backwards = backwards
+            || options
+                .reverse_at
+                .is_some_and(|at| simulation.step_count() >= at);
+        if backwards {
+            let steps = u64::from(options.common.steps_per_frame).min(simulation.step_count());
+            simulation.reverse_by(steps);
+        } else {
+            simulation.advance_by(u64::from(options.common.steps_per_frame));
+        }
         simulation.wait();
 
         // Offscreen frames are meant to be clean images, so the bar is opt-in.

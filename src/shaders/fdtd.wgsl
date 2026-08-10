@@ -42,7 +42,12 @@ struct Params {
     source_extent: vec4<u32>,
     // apodization centre xyz, 1/waist^2
     source_shape: vec4<f32>,
-    // amplitude * waveform(t), unused, unused, unused
+    // amplitude * waveform(t), then the direction of time: +1.0 steps
+    // forward, -1.0 undoes a step. With nothing lossy in the scene the
+    // inverse update is the forward update with the gain negated and the two
+    // half-steps run in the opposite order, so reversal needs no kernels of
+    // its own -- this one number is the whole feature. The host refuses to
+    // reverse lossy scenes, where the (1±loss) factors would stop cancelling.
     source_drive: vec4<f32>,
 }
 
@@ -162,7 +167,8 @@ fn update_magnetic(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let loss = material.magnetic_loss + magnetic_absorption(a, coord);
         let slot = a * cells + index;
-        magnetic[slot] = ((1.0 - loss) * magnetic[slot] - material.magnetic_gain * curl)
+        magnetic[slot] = ((1.0 - loss) * magnetic[slot]
+            - params.source_drive.y * material.magnetic_gain * curl)
             / (1.0 + loss);
     }
 }
@@ -197,7 +203,8 @@ fn update_electric(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let loss = material.electric_loss + electric_absorption(a, coord);
         let slot = a * cells + index;
-        electric[slot] = ((1.0 - loss) * electric[slot] + material.electric_gain * curl)
+        electric[slot] = ((1.0 - loss) * electric[slot]
+            + params.source_drive.y * material.electric_gain * curl)
             / (1.0 + loss);
     }
 }

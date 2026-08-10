@@ -240,6 +240,17 @@ impl Scene {
             .collect()
     }
 
+    /// Whether stepping backwards is numerically meaningful here: nothing in
+    /// the scene may be lossy — `Boundary::Pec` and materials with no
+    /// conductivity of either kind. Both solvers refuse to reverse anything
+    /// else; see `cpu::Simulation::reverse` for why loss forbids it.
+    pub fn is_reversible(&self) -> bool {
+        self.boundary == Boundary::Pec
+            && (0..self.materials.len() as u32)
+                .map(|index| self.materials.get(index))
+                .all(|material| material.conductivity == 0.0 && material.magnetic_loss == 0.0)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.grid.validate();
         // Structural checks first. Everything below rasterizes the shapes and
@@ -672,6 +683,29 @@ mod tests {
         });
         let error = scene.validate().unwrap_err();
         assert!(error.contains("reflection"), "{error}");
+    }
+
+    #[test]
+    fn the_scene_and_the_solver_agree_on_reversibility() {
+        // `Scene::is_reversible` answers from the recipe; the CPU solver
+        // answers from its computed coefficient table and absorber profile.
+        // The GPU solver trusts the scene-level answer, so the two routes
+        // must never disagree.
+        let reversible = Scene::cavity(Extent::cube(24));
+        let absorbing = Scene::photon(Extent::cube(24));
+        let mut conducting = Scene::cavity(Extent::cube(24));
+        let metal = conducting.materials.push(Material::PERFECT_CONDUCTOR);
+        conducting.shapes.push(Shape::Sphere {
+            center: [0.0; 3],
+            radius: 3e-3,
+            material: metal,
+        });
+        for scene in [reversible, absorbing, conducting] {
+            assert_eq!(
+                scene.is_reversible(),
+                crate::cpu::Simulation::new(&scene).is_reversible(),
+            );
+        }
     }
 
     #[test]
