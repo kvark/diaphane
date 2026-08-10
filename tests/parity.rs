@@ -64,6 +64,18 @@ fn assert_field_parity(
         peak > 0.0,
         "{name} is identically zero after {steps} steps -- the comparison would pass trivially"
     );
+    // A comparison against an absorbed remnant divides accumulating ulp-level
+    // solver divergence by a signal the absorber is busy destroying, and the
+    // ratio crosses any fixed tolerance eventually. Two tests have now hit
+    // this -- the second only on Metal, whose shader compiler contracts FMAs
+    // where lavapipe's CPU-like codegen does not -- so the trap checks for
+    // itself: if this fires, compare at an earlier step, not with a looser
+    // tolerance.
+    assert!(
+        peak > 2e-3,
+        "{name} peak {peak:e} after {steps} steps is an absorbed remnant; \
+         compare while the field is alive"
+    );
     for (axis, (host, device)) in reference.iter().zip(candidate.iter()).enumerate() {
         let relative = worst_difference(host, device) / peak;
         assert!(
@@ -237,15 +249,19 @@ fn a_graded_grid_is_graded_the_same_way_on_the_gpu() {
         material: glass,
     });
     // The source sits in the y-refined band two millimetres short of the
-    // x-refined one: the wave crosses both transitions, the slab, and reaches
-    // the absorber within the run.
+    // x-refined one: the wave crosses both transitions, the slab, and has
+    // its front a few dozen steps deep in the absorber by the comparison.
     let scene = scene.with_source(Source::point(
         [0.0, -4e-3, 0.0],
         Axis::Z,
         Waveform::ricker(frequency),
     ));
     scene.validate().unwrap();
-    assert_parity(&scene, 400, 1e-4);
+    // 280 and not 400: the Ricker peaks around step 178 at this grid's Δt,
+    // and by 400 the absorber had reduced the peak to 5e-4 -- a remnant
+    // comparison that failed on Metal for the reasons the guard in
+    // `assert_field_parity` spells out.
+    assert_parity(&scene, 280, 1e-4);
 }
 
 #[test]
